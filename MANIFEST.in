@@ -1,0 +1,21 @@
+include README.md
+include LICENSE
+include requirements.txt
+include MANIFEST.in
+
+recursive-include matchvar_annotator *.py
+recursive-include matchvar_annotator *.txt
+recursive-include matchvar_annotator *.yaml
+recursive-include matchvar_annotator *.yml
+
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
+recursive-exclude * .DS_Store
+recursive-exclude * .git*
+recursive-exclude * .pytest_cache
+recursive-exclude * .coverage
+recursive-exclude * htmlcov
+recursive-exclude * .tox
+recursive-exclude * .mypy_cache
+recursive-exclude * .eggs
+recursive-exclude * *.egg-info

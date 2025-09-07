@@ -1,0 +1,56 @@
+# MATCHVAR注释器配置文件
+
+# 资源目录配置
+resources_dir: "/path/to/resources"
+input_files_dir: "/path/to/input_files"
+
+# 基因组版本配置
+genome_version: "hg19"  # 支持 hg19, hg38
+
+# 线程配置
+thread_count: 4
+
+# 默认协议配置
+default_protocols:
+  gene_info:
+    - "refGene"
+    - "ensGene" 
+    - "knownGene"
+  database:
+    - "exac03"
+    - "gnomad211_genome"
+    - "esp6500siv2_all"
+    - "1000g2015aug_all"
+    - "clinvar"
+    - "cosmic70"
+  prediction:
+    - "avsift"
+    - "dbnsfp42a"
+    - "revel"
+    - "cadd13gt10"
+    - "AlphaMissense"
+
+# 默认操作配置
+default_operations:
+  gene_info: "g"
+  database: "f"
+  prediction: "f"
+
+# 输出配置
+output:
+  format: "tsv"  # tsv, csv
+  include_otherinfo: true
+  nastring: "."
+
+# 日志配置
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# 高级配置
+advanced:
+  timeout: 600  # 超时时间(秒)
+  use_mane_transcript: false
+  polish_gene_annotation: true
+  intron_hgvs: false
+  remove_temp_files: true
