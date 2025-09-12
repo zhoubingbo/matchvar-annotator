@@ -26,7 +26,7 @@ def read_requirements():
 
 setup(
     name="matchvar-annotator",
-    version="1.0.0",
+    version="1.1.1",
     author="Bingbo Zhou",
     author_email="zhoubingbo@hotmail.com",
     description="MATCHVAR Annotator - Functional annotation and analysis of genomic variants",

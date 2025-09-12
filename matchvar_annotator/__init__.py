@@ -13,7 +13,7 @@ Main Features:
 - Table Annotation
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.1"
 __author__ = "Bingbo Zhou"
 __email__ = "zhoubingbo@hotmail.com"
 __description__ = "MATCHVAR Annotator - Functional annotation and analysis of genomic variants"

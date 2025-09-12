@@ -167,8 +167,11 @@ class TableAnnotator:
         self.arguments = []
         self.dbtype1 = []
         
-        # Preload MANE transcript mapping (only load once)
-        self.mane_transcripts = self._load_mane_transcripts()
+        # Preload MANE transcript mapping (only load when use_mane_transcript is True)
+        if self.use_mane_transcript:
+            self.mane_transcripts = self._load_mane_transcripts()
+        else:
+            self.mane_transcripts = {}
         
         # Ensure outfile and tempfile use the same directory as the input file
         if self.outfile and not os.path.dirname(self.outfile):
@@ -364,16 +367,25 @@ class TableAnnotator:
         if self.intronhgvs:
             sc += f" -splicing_threshold {self.intronhgvs}"
         
-        # Add MANE transcript mapping parameter
-        if self.mane_transcripts:
+        # Add MANE transcript mapping parameter (only when use_mane_transcript is True)
+        if self.use_mane_transcript and self.mane_transcripts:
             # Write MANE transcript mapping to temporary file
             mane_file = f"{self.tempfile}.{protocol}.mane"
             try:
                 with open(mane_file, 'w', encoding='utf-8') as f:
-                    for gene_id, transcript_id in self.mane_transcripts.items():
-                        f.write(f"{gene_id}\t{transcript_id}\n")
+                    for gene_id, mane_info in self.mane_transcripts.items():
+                        # Write both RefSeq and Ensembl transcript IDs
+                        if isinstance(mane_info, dict):
+                            refseq = mane_info.get('refseq', '')
+                            ensembl = mane_info.get('ensembl', '')
+                            f.write(f"{gene_id}\t{refseq}\t{ensembl}\n")
+                        else:
+                            # Fallback for old format
+                            f.write(f"{gene_id}\t{mane_info}\n")
                 sc += f" -mane_file {mane_file}"
+                sc += f" -use_mane_transcript"
                 self.unlink_files.append(mane_file)
+                logger.info(f"Added MANE transcript filtering for protocol {protocol}")
             except Exception as e:
                 logger.warning(f"Failed to write MANE transcript mapping file: {e}")
         
@@ -464,7 +476,6 @@ class TableAnnotator:
                         
                         # Process GeneDetail information
                         gene_detail = ''
-                        gene_name = gene
                         aa_change = 'p.?'
                         
                         # Extract the transcript information in parentheses
@@ -472,11 +483,29 @@ class TableAnnotator:
                             import re
                             # Extract all the content in parentheses
                             transcript_matches = re.findall(r'\(([^)]+)\)', gene)
+                            # Remove the content in parentheses, keep the gene name
+                            gene_name = re.sub(r'\([^)]+\)', '', gene).strip()
+                            
                             if transcript_matches:
-                                # Use the transcript information as GeneDetail
+                                # Always use all transcript information first
                                 gene_detail = ';'.join(transcript_matches)
-                                # Remove the content in parentheses, keep the gene name
-                                gene_name = re.sub(r'\([^)]+\)', '', gene).strip()
+                                
+                                # Apply MANE transcript filtering if enabled
+                                if self.use_mane_transcript and gene_name in self.mane_transcripts:
+                                    mane_info = self.mane_transcripts[gene_name]
+                                    # Filter to only include MANE transcript
+                                    mane_transcript_matches = []
+                                    for match in transcript_matches:
+                                        if self._is_mane_transcript_match(match, mane_info):
+                                            mane_transcript_matches.append(match)
+                                    
+                                    if mane_transcript_matches:
+                                        gene_detail = ';'.join(mane_transcript_matches)
+                                        logger.info(f"Filtered to {len(mane_transcript_matches)} MANE transcript parts for gene {gene_name}")
+                                    else:
+                                        logger.warning(f"No MANE transcript matches found for gene {gene_name}, using all transcripts")
+                        else:
+                            gene_name = gene
                         
                         # Process GeneDetail and AAChange for intronic variants
                         if function == 'intronic' and gene_detail:
@@ -537,15 +566,32 @@ class TableAnnotator:
                         
                         # Update the exonic annotation information + variant type (VarType)
                         if varstring in self.varanno:
+                            # Extract p.HGVS from GeneDetail for AAChange
+                            gene_detail_key = f"GeneDetail_{protocol}" if self.dot2underline else f"GeneDetail.{protocol}"
+                            gene_detail = self.varanno[varstring].get(gene_detail_key, '')
+                            
+                            # Process AAChange: extract p.HGVS from aa_change variable
+                            aa_change_final = 'p.?'
+                            if aa_change and ':p.' in aa_change:
+                                # Extract p.HGVS from all transcripts in aa_change
+                                import re
+                                p_matches = re.findall(r':p\.([^:\s,]+)', aa_change)
+                                if p_matches:
+                                    # Join all p.HGVS parts with comma
+                                    aa_change_final = ','.join([f"p.{p}" for p in p_matches])
+                                else:
+                                    # If no p.HGVS found, use p.?
+                                    aa_change_final = 'p.?'
+                            
                             # Write ExonicFunc and AAChange
                             if self.dot2underline:
                                 self.varanno[varstring][f"ExonicFunc_{protocol}"] = exonic_function
-                                self.varanno[varstring][f"AAChange_{protocol}"] = aa_change
+                                self.varanno[varstring][f"AAChange_{protocol}"] = aa_change_final
                             else:
                                 self.varanno[varstring][f"ExonicFunc.{protocol}"] = exonic_function
-                                self.varanno[varstring][f"AAChange.{protocol}"] = aa_change
+                                self.varanno[varstring][f"AAChange.{protocol}"] = aa_change_final
 
-                            # Calculate VarType (uniform standard: non-frameshift = inframe)
+                            # Calculate VarType (uniform口径：非移码= inframe)
                             try:
                                 func_key = f"Func_{protocol}" if self.dot2underline else f"Func.{protocol}"
                                 vartype_key = f"VarType_{protocol}" if self.dot2underline else f"VarType.{protocol}"
@@ -641,14 +687,7 @@ class TableAnnotator:
                                     if ('c.' in gene_detail_final) or (':p.' in gene_detail_final):
                                         self.varanno[varstring][gene_detail_key] = gene_detail_final
                                     
-                                    # Process AAChange: extract only p.HGVS part
-                                    aa_change_final = 'p.?'
-                                    if ':p.' in detail_candidate:
-                                        # Extract p.HGVS part
-                                        p_match = re.search(r':p\.([^:\s]+)', detail_candidate)
-                                        if p_match:
-                                            aa_change_final = f"p.{p_match.group(1)}"
-                                    self.varanno[varstring][aa_change_key] = aa_change_final
+                                    # AAChange is already set in the earlier logic, no need to override
                             except Exception:
                                 pass
         
@@ -948,8 +987,6 @@ class TableAnnotator:
                             varstring = '\t'.join(parts[:5])
                             info = '\t'.join(parts[5:]) if len(parts) > 5 else ''
                             
-                            logger.debug(f"Processing line: {varstring}")
-                            
                             if linecount == 0:
                                 # Write the header (fixed as TSV)
                                 header_line = "\t".join(['Chr', 'Start', 'End', 'Ref', 'Alt'] + expanded_header)
@@ -1047,12 +1084,13 @@ class TableAnnotator:
                     
                     parts = line.split('\t')
                     if len(parts) >= 9:
-                        # GTF format: chr, source, feature, start, end, score, strand, frame, attributes
+                        # GTF格式：chr, source, feature, start, end, score, strand, frame, attributes
                         attributes = parts[8]
                         
                         # Parse the attribute field
                         gene_id = None
                         transcript_id = None
+                        ensembl_transcript_id = None
                         
                         for attr in attributes.split(';'):
                             attr = attr.strip()
@@ -1060,27 +1098,80 @@ class TableAnnotator:
                                 gene_id = attr.split('"')[1] if '"' in attr else attr.split()[1]
                             elif attr.startswith('transcript_id'):
                                 transcript_id = attr.split('"')[1] if '"' in attr else attr.split()[1]
+                            elif attr.startswith('db_xref') and 'Ensembl:' in attr:
+                                # Extract Ensembl transcript ID
+                                ensembl_part = attr.split('Ensembl:')[1].split('"')[0] if '"' in attr else attr.split('Ensembl:')[1]
+                                ensembl_transcript_id = ensembl_part
                         
                         if gene_id and transcript_id:
-                            mane_transcripts[gene_id] = transcript_id
+                            # Store both RefSeq and Ensembl transcript IDs
+                            # Use the base transcript ID (without version) as key for matching
+                            base_transcript_id = transcript_id.split('.')[0] if '.' in transcript_id else transcript_id
+                            base_ensembl_id = ensembl_transcript_id.split('.')[0] if ensembl_transcript_id and '.' in ensembl_transcript_id else ensembl_transcript_id
+                            
+                            # Handle multiple MANE transcripts for the same gene
+                            if gene_id in mane_transcripts:
+                                # If gene already has a MANE transcript, check if this is MANE Select
+                                # MANE Select has higher priority than MANE Plus Clinical
+                                if 'MANE Select' in attributes:
+                                    mane_transcripts[gene_id] = {
+                                        'refseq': transcript_id,
+                                        'ensembl': ensembl_transcript_id,
+                                        'base_refseq': base_transcript_id,
+                                        'base_ensembl': base_ensembl_id
+                                    }
+                                # If current is MANE Plus Clinical and existing is not MANE Select, keep existing
+                                elif 'MANE Plus Clinical' in attributes and 'MANE Select' not in str(mane_transcripts.get(gene_id, {}).get('refseq', '')):
+                                    pass  # Keep existing MANE Select
+                                else:
+                                    mane_transcripts[gene_id] = {
+                                        'refseq': transcript_id,
+                                        'ensembl': ensembl_transcript_id,
+                                        'base_refseq': base_transcript_id,
+                                        'base_ensembl': base_ensembl_id
+                                    }
+                            else:
+                                mane_transcripts[gene_id] = {
+                                    'refseq': transcript_id,
+                                    'ensembl': ensembl_transcript_id,
+                                    'base_refseq': base_transcript_id,
+                                    'base_ensembl': base_ensembl_id
+                                }
             
             logger.info(f"Loaded {len(mane_transcripts)} MANE transcript mappings")
         except Exception as e:
             logger.error(f"Failed to load MANE transcript file: {e}")
         
         return mane_transcripts
+    
+    def _is_mane_transcript_match(self, transcript_part: str, mane_info: Dict) -> bool:
+        """Check if a transcript part matches MANE transcript information"""
+        try:
+            # Extract transcript ID from the part (format: transcript_id:exon:c.position)
+            if ':' in transcript_part:
+                transcript_id = transcript_part.split(':')[0]
+                base_transcript_id = transcript_id.split('.')[0] if '.' in transcript_id else transcript_id
+                
+                # Check if it matches MANE RefSeq or Ensembl transcript
+                if (mane_info.get('base_refseq') == base_transcript_id or 
+                    mane_info.get('base_ensembl') == base_transcript_id):
+                    return True
+        except Exception as e:
+            logger.warning(f"Failed to check MANE transcript match: {e}")
+        
+        return False
 
 def main():
     """Main function"""
     examples = (
-        "Examples:\n"
-        "1) Gene annotation + region annotation based on MV input file (TSV output)\n"
+        "示例:\n"
+        "1) 基于MV输入文件进行基因注释 + 区域注释 (TSV输出)\n"
         "   python utils/matchvar/table_matchvar.py \\\n+        /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/202511.family.mvinput \\\n+        /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/humandb \\\n+        -outfile /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/matchvar \\\n+        -buildver hg19 -protocol refGene,cytoBand -operation g,r\n\n"
-        "2) Start directly from VCF (automatically converts to MV input internally) and retain original info columns\n"
+        "2) 直接从VCF开始（内部会自动转换为MV输入），并保留原始信息列\n"
         "   python utils/matchvar/table_matchvar.py \\\n+        /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/202511.family.vcf \\\n+        /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/humandb \\\n+        -vcfinput -otherinfo -outfile result -buildver hg19 \\\n+        -protocol refGene,exac03,avsift -operation g,f,f\n\n"
-        "3) Specify threads and NA placeholder, output to current directory\n"
+        "3) 指定线程与NA占位符，输出到当前目录\n"
         "   python utils/matchvar/table_matchvar.py input.mvinput resources/humandb \\\n+        -outfile out -thread 8 -nastring . -buildver hg19 \\\n+        -protocol refGene,clinvar -operation g,f\n\n"
-        "Tip: You can specify the subprocess interpreter by setting the environment variable PYTHON_EXECUTABLE; otherwise, it will automatically look for the project .venv or fall back to the current interpreter."
+        "提示: 可通过设置环境变量 PYTHON_EXECUTABLE 指定子进程解释器；否则自动寻找项目 .venv 或回退到当前解释器。"
     )
     parser = argparse.ArgumentParser(
         description='MATCHVAR table annotation tool',
@@ -1104,7 +1195,7 @@ def main():
     parser.add_argument('-polishgene', action='store_true', help='Optimize gene annotation')
     parser.add_argument('-intronhgvs', action='store_true', help='Output intronic HGVSp')
     
-    # Add new important parameters
+    # 添加新的重要参数
     parser.add_argument('-verbose', '-v', action='store_true', help='Verbose output')
     parser.add_argument('-man', '-m', action='store_true', help='Display manual')
     parser.add_argument('-checkfile', action='store_true', help='Check file existence')

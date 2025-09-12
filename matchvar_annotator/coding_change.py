@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-MATCHVAR Coding Change Analysis Tool
-Analyzes the impact of DNA-level variants on protein sequences
+MATCHVAR编码变化分析工具
+分析DNA水平变异对蛋白质序列的影响
 """
 
 import os
@@ -11,11 +11,11 @@ import logging
 import re
 from typing import Dict, List, Tuple, Optional
 
-# Set up logging
+# 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Codon table
+# 密码子表
 CODON_TABLE = {
     'TTT': 'F', 'TTC': 'F', 'TCT': 'S', 'TCC': 'S', 'TAT': 'Y', 'TAC': 'Y',
     'TGT': 'C', 'TGC': 'C', 'TTA': 'L', 'TCA': 'S', 'TAA': '*', 'TGA': '*',
@@ -30,7 +30,7 @@ CODON_TABLE = {
     'GAA': 'E', 'GAG': 'E', 'GGA': 'G', 'GGG': 'G'
 }
 
-# Mitochondrial codon table
+# 线粒体密码子表
 CODON_TABLE_MT = {
     'TTT': 'F', 'TTC': 'F', 'TCT': 'S', 'TCC': 'S', 'TAT': 'Y', 'TAC': 'Y',
     'TGT': 'C', 'TGC': 'C', 'TTA': 'L', 'TCA': 'S', 'TAA': '*', 'TGA': 'W',
@@ -45,7 +45,7 @@ CODON_TABLE_MT = {
     'GAA': 'E', 'GAG': 'E', 'GGA': 'G', 'GGG': 'G'
 }
 
-# Amino acid single letter to three letter mapping (HGVS p. notation uses three letters)
+# 氨基酸单字母到三字母映射（HGVS p. 表示用三字母）
 AA_ONE_TO_THREE = {
     'A': 'Ala', 'R': 'Arg', 'N': 'Asn', 'D': 'Asp', 'C': 'Cys',
     'Q': 'Gln', 'E': 'Glu', 'G': 'Gly', 'H': 'His', 'I': 'Ile',
@@ -58,7 +58,7 @@ def reverse_complement(seq: str) -> str:
     comp = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'N': 'N'}
     return ''.join(comp.get(b, 'N') for b in reversed(seq.upper()))
 
-# ===================== General c.HGVS -> p. engine helper functions =====================
+# ===================== 通用 c.HGVS -> p. 引擎辅助函数 =====================
 
 def translate_protein(dna: str, chrom: str) -> str:
     dna = dna.upper()
@@ -76,25 +76,25 @@ def three_letter(aa: str) -> str:
     return AA_ONE_TO_THREE.get(aa, 'Xaa')
 
 def diff_proteins(wt: str, mut: str) -> Tuple[int, str, str, int]:
-    """Return (pos1, aa1_diff, aa2_diff, pos2)
-    pos1/pos2 are 1-based position windows, aa1_diff/aa2_diff are difference segments (may be empty)"""
+    """返回 (pos1, aa1_diff, aa2_diff, pos2)
+    pos1/pos2 为1-based位置窗口，aa1_diff/aa2_diff为差异段（可能为空）"""
     i = 0
     L1, L2 = len(wt), len(mut)
     while i < L1 and i < L2 and wt[i] == mut[i]:
         i += 1
     if i == L1 and i == L2:
-        return 0, '', '', 0  # Identical
-    # Trim common suffix from tail (more reasonable to handle only in non-frameshift cases, here uniformly take difference segment first)
+        return 0, '', '', 0  # 完全相同
+    # 从尾部修剪公共后缀（仅在非frameshift情况下处理更合理，这里统一先取差异段）
     j1, j2 = L1 - 1, L2 - 1
     while j1 >= i and j2 >= i and wt[j1] == mut[j2]:
         j1 -= 1
         j2 -= 1
     aa1_diff = wt[i:j1+1]
     aa2_diff = mut[i:j2+1]
-    return i + 1, aa1_diff, aa2_diff, (j1 + 1)  # 1-based start, pos2 uses wt end position
+    return i + 1, aa1_diff, aa2_diff, (j1 + 1)  # 1-based 起始，pos2 使用wt端结束位置
 
 def format_p_hgvs_from_diff(wt: str, mut: str, chrom: str, effect_hint: Optional[str] = None) -> Tuple[str, str]:
-    """Generate p. annotation and effect based on protein differences. Prioritize frameshift/stopgain cases."""
+    """根据蛋白差异生成p.注释与effect。优先处理frameshift/stopgain等情况。"""
     pos1, aa1, aa2, pos2 = diff_proteins(wt, mut)
     if pos1 == 0:
         # 无氨基酸差异：HGVS 推荐 p.(=)
@@ -1118,36 +1118,36 @@ class CodingChange:
             raise
 
 def main():
-    """Main function"""
+    """主函数"""
     examples = (
-        "Examples:\n"
-        "1) Run coding change analysis based on EVF/gene/FASTA and generate corrected EVF:\n"
+        "示例:\n"
+        "1) 基于EVF/基因/FASTA运行编码变化分析，并生成修正后的EVF：\n"
         "   python utils/matchvar/coding_change.py \\\n+        result.refGene.exonic_variant_function \\\n+        /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/humandb/hg19_refGene.txt \\\n+        /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/humandb/hg19_refGeneMrna.fa \\\n+        -alltranscript -newevf result.refGene.exonic_variant_function.fixed\n\n"
-        "2) Output auxiliary results only to specified file:\n"
+        "2) 仅输出辅助结果到指定文件：\n"
         "   python utils/matchvar/coding_change.py evf.txt hg19_refGene.txt hg19_refGeneMrna.fa -outfile out.coding_change\n\n"
-        "3) Tolerate errors and enable verbose logging:\n"
+        "3) 容忍错误并开启详细日志：\n"
         "   python utils/matchvar/coding_change.py evf.txt hg19_refGene.txt hg19_refGeneMrna.fa -tolerate -v\n"
     )
     parser = argparse.ArgumentParser(
-        description='MATCHVAR Coding Change Analysis Tool',
+        description='MATCHVAR编码变化分析工具',
         epilog=examples,
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument('evffile', help='Exonic variant function file')
-    parser.add_argument('genefile', help='Gene definition file')
-    parser.add_argument('fastafile', help='FASTA file')
-    parser.add_argument('-includesnp', action='store_true', help='Include SNP')
-    parser.add_argument('-mrnaseq', action='store_true', help='mRNA sequence')
-    parser.add_argument('-onlyAltering', action='store_true', help='Only altering sequences')
-    parser.add_argument('-codingseq', action='store_true', help='Coding sequence')
-    parser.add_argument('-alltranscript', action='store_true', help='All transcripts')
-    parser.add_argument('-newevf', help='New exonic variant function file')
-    parser.add_argument('-outfile', help='Output file')
-    parser.add_argument('-tolerate', action='store_true', help='Tolerate errors')
+    parser.add_argument('evffile', help='外显子变异功能文件')
+    parser.add_argument('genefile', help='基因定义文件')
+    parser.add_argument('fastafile', help='FASTA文件')
+    parser.add_argument('-includesnp', action='store_true', help='包含SNP')
+    parser.add_argument('-mrnaseq', action='store_true', help='mRNA序列')
+    parser.add_argument('-onlyAltering', action='store_true', help='仅改变序列')
+    parser.add_argument('-codingseq', action='store_true', help='编码序列')
+    parser.add_argument('-alltranscript', action='store_true', help='所有转录本')
+    parser.add_argument('-newevf', help='新的外显子变异功能文件')
+    parser.add_argument('-outfile', help='输出文件')
+    parser.add_argument('-tolerate', action='store_true', help='容忍错误')
     
-    # Add new important parameters
-    parser.add_argument('-verbose', '-v', action='store_true', help='Verbose output')
-    parser.add_argument('-man', '-m', action='store_true', help='Show manual')
+    # 添加新的重要参数
+    parser.add_argument('-verbose', '-v', action='store_true', help='详细输出')
+    parser.add_argument('-man', '-m', action='store_true', help='显示手册')
     
     if len(sys.argv) == 1:
         parser.print_help()

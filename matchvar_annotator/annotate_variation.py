@@ -94,6 +94,8 @@ class AnnotateVariation:
         self.rawscore = kwargs.get('rawscore', False)  # Add rawscore parameter
         # Intronic dup recognition (remote Ensembl REST)
         self.intronic_dup_remote = kwargs.get('intronic_dup_remote', False)
+        # MANE transcript filtering
+        self.use_mane_transcript = kwargs.get('use_mane_transcript', False)
         self.intronic_dup_window = int(kwargs.get('intronic_dup_window', 50) or 50)
         
         # Add new important parameters
@@ -150,13 +152,16 @@ class AnnotateVariation:
         self._wget_explicitly_set = kwargs.get('_wget_explicitly_set', False) # Add flag to track whether wget is set through command line parameters
         self._precedence_explicitly_set = kwargs.get('_precedence_explicitly_set', False) # Add flag to track whether precedence is set through command line parameters
         
-        # Preload MANE transcript mapping (only load once)
-        if self.mane_file and os.path.exists(self.mane_file):
-            # Load MANE transcript mapping from file
-            self.mane_transcripts = self._load_mane_transcripts_from_file(self.mane_file)
+        # Preload MANE transcript mapping (only load when use_mane_transcript is True)
+        if self.use_mane_transcript:
+            if self.mane_file and os.path.exists(self.mane_file):
+                # Load MANE transcript mapping from file
+                self.mane_transcripts = self._load_mane_transcripts_from_file(self.mane_file)
+            else:
+                # Load MANE transcript mapping from default location
+                self.mane_transcripts = self._load_mane_transcripts()
         else:
-            # Load MANE transcript mapping from default location
-            self.mane_transcripts = self._load_mane_transcripts()
+            self.mane_transcripts = {}
         
         # Process arguments
         self._process_arguments()
@@ -336,19 +341,25 @@ class AnnotateVariation:
         
         # Start main program
         if self.thread:
+            # 使用多线程实现
             self._run_multi_threaded_annotation(queryfile_line_count, chunk_line_count)
         else:
             self._run_single_threaded_annotation()
     
     def _calculate_chunk_line(self, queryfile: str, thread: int) -> Tuple[int, int]:
-        """Calculate chunk line count"""
+        """Calculate chunk line count with optimized chunking strategy"""
         try:
             with open(queryfile, 'r', encoding='utf-8') as f:
                 line_count = sum(1 for line in f if line.strip() and not line.startswith('#'))
             
-            chunk_line_count = line_count // thread
-            if chunk_line_count == 0:
-                chunk_line_count = 1
+            # 优化分块策略：对于大文件使用更大的块，减少线程间切换开销
+            if line_count < 1000:
+                chunk_line_count = max(1, line_count // thread)
+            elif line_count < 10000:
+                chunk_line_count = max(100, line_count // thread)
+            else:
+                # 对于大文件，使用更大的块大小，但不超过5000行
+                chunk_line_count = min(5000, max(1000, line_count // thread))
             
             return line_count, chunk_line_count
         except Exception as e:
@@ -359,7 +370,7 @@ class AnnotateVariation:
         """Run multi-threaded annotation"""
         threads = []
         
-        # Preload database to avoid repeated loading by each thread
+        # 预加载数据库，避免每个线程重复加载
         if self.geneanno:
             logger.info("Pre-loading gene database for multi-threading...")
             gene_db = self._load_gene_database()
@@ -486,7 +497,7 @@ class AnnotateVariation:
                     if self.dbtype1 == 'refGene':
                         if len(parts) < 15:
                             continue
-                        # refGene format: bin, name, chrom, strand, txStart, txEnd, cdsStart, cdsEnd, exonCount, exonStarts, exonEnds, score, name2, cdsStartStat, cdsEndStat
+                        # refGene格式: bin, name, chrom, strand, txStart, txEnd, cdsStart, cdsEnd, exonCount, exonStarts, exonEnds, score, name2, cdsStartStat, cdsEndStat
                         gene_info = {
                             'name': parts[1],
                             'chrom': parts[2],
@@ -827,7 +838,8 @@ class AnnotateVariation:
             threshold = self.indel_splicing_threshold if (len(ref) != len(alt)) and (self.indel_splicing_threshold is not None) else self.splicing_threshold
 
             # Standard transcript ID
-            transcript_id = self._get_standard_transcript_id(gene.get('name', 'Unknown'), gene.get('name', 'Unknown'), self.dbtype1)
+            # gene.get('name') is transcript ID, gene.get('name2') is gene name
+            transcript_id = self._get_standard_transcript_id(gene.get('name2', 'Unknown'), gene.get('name', 'Unknown'), self.dbtype1)
 
             # Build CDS segments and calculate the cumulative cDNA intervals for cpos
             coding_segments = []  # (seg_start, seg_end, exon_index)
@@ -1026,8 +1038,10 @@ class AnnotateVariation:
                     break
             
             # Get standard transcript ID
-            original_transcript_id = gene_name
-            standard_transcript_id = self._get_standard_transcript_id(gene_name, original_transcript_id, self.dbtype1)
+            # gene_name is actually the transcript ID, gene name is in gene.get('name2')
+            original_transcript_id = gene_name  # This is actually transcript ID
+            gene_name_actual = gene.get('name2', gene_name)  # This is the actual gene name
+            standard_transcript_id = self._get_standard_transcript_id(gene_name_actual, original_transcript_id, self.dbtype1)
             
             # First determine if it is in any exon
             in_exon = False
@@ -1145,12 +1159,12 @@ class AnnotateVariation:
 
                 # Organize intronic c.HGVS based on variant type (SNV/deletion/insertion/substitution)
                 if len(ref_b) == 1 and len(alt_b) == 1:
-                    return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}{ref_b}>{alt_b}"
+                    return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}{ref_b}>{alt_b}:p.?"
                 elif len(ref_b) > len(alt_b):
                     if len(alt_b) == 0:
-                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}del{ref_b}"
+                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}del{ref_b}:p.?"
                     else:
-                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}del{ref_b}ins{alt_b}"
+                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}del{ref_b}ins{alt_b}:p.?"
                 elif len(ref_b) < len(alt_b):
                     if len(ref_b) == 0:
                         # Insertion: try to identify dup remotely, otherwise output ins
@@ -1163,14 +1177,14 @@ class AnnotateVariation:
                         if self.intronic_dup_remote:
                             try:
                                 if self._is_intronic_dup_by_remote(variant['chrom'], variant['start'], alt_b, strand):
-                                    return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{o1}_{N_base}{sign}{o2}dup{alt_b}"
+                                    return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{o1}_{N_base}{sign}{o2}dup{alt_b}:p.?"
                             except Exception:
                                 pass
-                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{o1}_{N_base}{sign}{o2}ins{alt_b}"
+                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{o1}_{N_base}{sign}{o2}ins{alt_b}:p.?"
                     else:
-                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}del{ref_b}ins{alt_b}"
+                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}del{ref_b}ins{alt_b}:p.?"
                 else:
-                    return f"{standard_transcript_id}:intronic"
+                    return f"{standard_transcript_id}:intronic:p.?"
             
             # Check if it is in UTR region (exon or intron), if so, use special c.HGVS format
             # In refGene.txt, cds_start and cds_end are always cds_start < cds_end regardless of strand
@@ -1220,17 +1234,17 @@ class AnnotateVariation:
                             # Calculate the distance to the start codon (negative)
                             utr_position = variant_start - cds_start
                             if len(ref) == 1 and len(alt) == 1:
-                                hgvs = f"{standard_transcript_id}:c.-{abs(utr_position)}{ref}>{alt}"
+                                hgvs = f"{standard_transcript_id}:UTR5:c.-{abs(utr_position)}{ref}>{alt}:p.?"
                             else:
-                                hgvs = f"{standard_transcript_id}:c.-{abs(utr_position)}delins{alt}"
+                                hgvs = f"{standard_transcript_id}:UTR5:c.-{abs(utr_position)}delins{alt}:p.?"
                         else:
                             # UTR3: the last nucleotide of the stop codon is the boundary, 3'UTR is *1, *2, *3...
                             # Calculate the distance to the stop codon (positive)
                             utr_position = variant_start - cds_end
                             if len(ref) == 1 and len(alt) == 1:
-                                hgvs = f"{standard_transcript_id}:c.*{abs(utr_position)}{ref}>{alt}"
+                                hgvs = f"{standard_transcript_id}:UTR3:c.*{abs(utr_position)}{ref}>{alt}:p.?"
                             else:
-                                hgvs = f"{standard_transcript_id}:c.*{abs(utr_position)}delins{alt}"
+                                hgvs = f"{standard_transcript_id}:UTR3:c.*{abs(utr_position)}delins{alt}:p.?"
                     else:
                         # Negative strand gene
                         if variant_start > cds_end:
@@ -1240,9 +1254,9 @@ class AnnotateVariation:
                             ref_seq = self._reverse_complement(ref) if ref else ''
                             alt_seq = self._reverse_complement(alt) if alt else ''
                             if len(ref_seq) == 1 and len(alt_seq) == 1:
-                                hgvs = f"{standard_transcript_id}:c.-{abs(utr_position)}{ref_seq}>{alt_seq}"
+                                hgvs = f"{standard_transcript_id}:UTR5:c.-{abs(utr_position)}{ref_seq}>{alt_seq}:p.?"
                             else:
-                                hgvs = f"{standard_transcript_id}:c.-{abs(utr_position)}delins{alt_seq}"
+                                hgvs = f"{standard_transcript_id}:UTR5:c.-{abs(utr_position)}delins{alt_seq}:p.?"
                         else:
                             # Negative strand gene: the region with smaller genome coordinates corresponds to the 3' end of the transcript
                             # So this is UTR3, the stop codon is the boundary, 3'UTR is *1, *2, *3...
@@ -1250,9 +1264,9 @@ class AnnotateVariation:
                             ref_seq = self._reverse_complement(ref) if ref else ''
                             alt_seq = self._reverse_complement(alt) if alt else ''
                             if len(ref_seq) == 1 and len(alt_seq) == 1:
-                                hgvs = f"{standard_transcript_id}:c.*{abs(utr_position)}{ref_seq}>{alt_seq}"
+                                hgvs = f"{standard_transcript_id}:UTR3:c.*{abs(utr_position)}{ref_seq}>{alt_seq}:p.?"
                             else:
-                                hgvs = f"{standard_transcript_id}:c.*{abs(utr_position)}delins{alt_seq}"
+                                hgvs = f"{standard_transcript_id}:UTR3:c.*{abs(utr_position)}delins{alt_seq}:p.?"
                 else:
                     # UTR intronic: based on the neighboring exon number naming
                     # This logic has been moved to the _generate_utr_intronic_hgvs method
@@ -1584,15 +1598,204 @@ class AnnotateVariation:
                 'aa_change': 'NA'
             }
         
-        # Priority: exonic > intronic > utr > upstream/downstream
-        priority_order = ['exonic', 'intronic', 'utr5', 'utr3', 'upstream', 'downstream']
+        # Always combine all transcript annotations first
+        combined_annotation = self._combine_transcript_annotations(annotations)
         
-        for func_type in priority_order:
-            for annotation in annotations:
-                if annotation['function'] == func_type:
-                    return annotation
+        # If MANE transcript filtering is enabled, filter the combined annotation
+        if self.use_mane_transcript:
+            combined_annotation = self._filter_mane_annotation(combined_annotation)
         
-        return annotations[0]
+        return combined_annotation
+    
+    def _filter_mane_annotation(self, annotation: Dict) -> Dict:
+        """Filter annotation to only include MANE transcript information"""
+        if not self.use_mane_transcript or not annotation:
+            return annotation
+        
+        gene_name = annotation.get('gene', '')
+        gene_detail = annotation.get('gene_detail', '')
+        
+        # Check if this gene has MANE transcript information
+        if gene_name not in self.mane_transcripts:
+            return annotation
+        
+        mane_info = self.mane_transcripts[gene_name]
+        filtered_annotation = annotation.copy()
+        
+        # Filter gene_detail to only include MANE transcript information
+        if gene_detail and gene_detail != 'NA':
+            # Split by comma and find parts containing MANE transcript IDs
+            parts = gene_detail.split(',')
+            mane_parts = []
+            
+            for part in parts:
+                part = part.strip()
+                # Check if this part contains MANE transcript ID (by base ID)
+                if self._is_mane_transcript_part(part, mane_info):
+                    mane_parts.append(part)
+            
+            if mane_parts:
+                filtered_annotation['gene_detail'] = ','.join(mane_parts)
+                logger.info(f"Filtered gene_detail for {gene_name}: {len(mane_parts)} MANE transcript parts")
+            else:
+                # If no MANE transcript parts found, keep original
+                logger.warning(f"No MANE transcript parts found in gene_detail for {gene_name}")
+        
+        # Filter AAChange based on filtered gene_detail
+        if filtered_annotation.get('gene_detail') != annotation.get('gene_detail'):
+            # Extract p.HGVS from the filtered gene_detail
+            filtered_annotation['aa_change'] = self._extract_aa_change_from_gene_detail(
+                filtered_annotation.get('gene_detail', '')
+            )
+        
+        return filtered_annotation
+    
+    def _is_mane_transcript_part(self, part: str, mane_info: Dict) -> bool:
+        """Check if a gene_detail part contains MANE transcript information"""
+        try:
+            # Extract transcript ID from the part (format: transcript_id:exon:c.position)
+            if ':' in part:
+                transcript_id = part.split(':')[0]
+                base_transcript_id = transcript_id.split('.')[0] if '.' in transcript_id else transcript_id
+                
+                # Check if it matches MANE RefSeq or Ensembl transcript
+                if (mane_info.get('base_refseq') == base_transcript_id or 
+                    mane_info.get('base_ensembl') == base_transcript_id):
+                    return True
+        except Exception as e:
+            logger.warning(f"Failed to check MANE transcript part: {e}")
+        
+        return False
+    
+    def _extract_aa_change_from_gene_detail(self, gene_detail: str) -> str:
+        """Extract p.HGVS from gene_detail"""
+        try:
+            if not gene_detail or gene_detail == 'NA':
+                return 'NA'
+            
+            # Look for p.HGVS pattern in gene_detail
+            import re
+            p_hgvs_pattern = r':p\.[^,]+'
+            matches = re.findall(p_hgvs_pattern, gene_detail)
+            
+            if matches:
+                # Return the first p.HGVS found
+                return matches[0][1:]  # Remove the leading ':'
+            else:
+                return 'NA'
+        except Exception as e:
+            logger.warning(f"Failed to extract p.HGVS from gene_detail: {e}")
+            return 'NA'
+    
+    def _filter_mane_transcript_details(self, annotation: Dict, mane_transcript_id: str) -> Dict:
+        """Filter annotation details to only include MANE transcript information"""
+        filtered_annotation = annotation.copy()
+        
+        # Filter gene_detail to only include MANE transcript
+        gene_detail = annotation['gene_detail']
+        if gene_detail != 'NA':
+            # Split by comma and find parts containing the MANE transcript ID
+            parts = gene_detail.split(',')
+            mane_parts = [part for part in parts if mane_transcript_id in part]
+            filtered_annotation['gene_detail'] = ','.join(mane_parts) if mane_parts else 'NA'
+        
+        # Filter exonic_function and aa_change similarly
+        exonic_function = annotation['exonic_function']
+        if exonic_function != 'NA':
+            # For exonic_function, we need to be more careful as it might not directly contain transcript IDs
+            # For now, we'll keep the original logic but this might need refinement
+            pass
+        
+        aa_change = annotation['aa_change']
+        if aa_change != 'NA':
+            # For aa_change, we need to be more careful as it might not directly contain transcript IDs
+            # For now, we'll keep the original logic but this might need refinement
+            pass
+        
+        return filtered_annotation
+    
+    def _combine_transcript_annotations(self, annotations: List[Dict]) -> Dict:
+        """Combine all transcript annotations into a single annotation"""
+        if not annotations:
+            return {
+                'function': 'intergenic',
+                'gene': 'NA',
+                'gene_detail': 'NA',
+                'exonic_function': 'NA',
+                'aa_change': 'NA'
+            }
+        
+        # Group annotations by gene name
+        gene_groups = {}
+        for annotation in annotations:
+            gene_name = annotation['gene']
+            if gene_name not in gene_groups:
+                gene_groups[gene_name] = []
+            gene_groups[gene_name].append(annotation)
+        
+        # For each gene, combine all transcript annotations
+        combined_annotations = []
+        for gene_name, gene_annotations in gene_groups.items():
+            # Sort by function priority
+            priority_order = ['exonic', 'intronic', 'utr5', 'utr3', 'upstream', 'downstream']
+            gene_annotations.sort(key=lambda x: priority_order.index(x['function']) if x['function'] in priority_order else len(priority_order))
+            
+            # Combine gene details (transcript information) - use comma separation for coding_change.py
+            gene_details = []
+            exonic_functions = []
+            aa_changes = []
+            
+            for annotation in gene_annotations:
+                if annotation['gene_detail'] != 'NA':
+                    gene_details.append(annotation['gene_detail'])
+                    # Extract p.HGVS from gene_detail for AAChange column
+                    p_hgvs = self._extract_p_hgvs_from_gene_detail(annotation['gene_detail'])
+                    if p_hgvs:
+                        aa_changes.append(p_hgvs)
+                if annotation['exonic_function'] != 'NA':
+                    exonic_functions.append(annotation['exonic_function'])
+            
+            # Create combined annotation - use comma separation for coding_change.py to process
+            combined_annotation = {
+                'function': gene_annotations[0]['function'],  # Use the highest priority function
+                'gene': gene_name,
+                'gene_detail': ','.join(gene_details) if gene_details else 'NA',
+                'exonic_function': ','.join(exonic_functions) if exonic_functions else 'NA',
+                'aa_change': ','.join(aa_changes) if aa_changes else 'NA'
+            }
+            
+            # Apply MANE filtering if enabled
+            if self.use_mane_transcript:
+                combined_annotation = self._filter_mane_annotation(combined_annotation)
+            
+            combined_annotations.append(combined_annotation)
+        
+        # If multiple genes, return the first one (this shouldn't happen in normal cases)
+        return combined_annotations[0] if combined_annotations else annotations[0]
+    
+    def _extract_p_hgvs_from_gene_detail(self, gene_detail: str) -> str:
+        """Extract p.HGVS from gene_detail string"""
+        try:
+            # Split by comma to get individual transcript annotations
+            transcript_annotations = [x.strip() for x in gene_detail.split(',') if x.strip()]
+            
+            p_hgvs_list = []
+            for annotation in transcript_annotations:
+                # Look for p.HGVS pattern: :p.xxx
+                if ':p.' in annotation:
+                    # Extract the p.HGVS part after the last ':p.'
+                    p_hgvs = annotation.split(':p.')[-1]
+                    if p_hgvs:
+                        p_hgvs_list.append(f"p.{p_hgvs}")
+                else:
+                    # If no p.HGVS found, add p.?
+                    p_hgvs_list.append("p.?")
+            
+            return ','.join(p_hgvs_list) if p_hgvs_list else "p.?"
+            
+        except Exception as e:
+            logger.warning(f"Failed to extract p.HGVS from gene_detail: {e}")
+            return "p.?"
     
     def _write_gene_annotation(self, variant: Dict, annotation: Dict, var_f, exonic_f):
         """Write the gene annotation result"""
@@ -1759,7 +1962,7 @@ class AnnotateVariation:
             raise
     
     def _load_filter_database(self) -> Dict:
-        """Load the filter database.
+        """Load the filter database with optimized memory usage.
         For huge files (e.g., 30G gnomad), prefer Tabix index if available to avoid full load.
         Returns either:
           - dict for small files (legacy behavior)
@@ -1769,10 +1972,17 @@ class AnnotateVariation:
         filter_file_gz = filter_file_txt + ".gz"
         tabix_tbi = filter_file_gz + ".tbi"
         
-        # Prefer Tabix if available and pysam present
-        if pysam and os.path.exists(filter_file_gz) and os.path.exists(tabix_tbi):
+        # 检查文件大小，决定加载策略
+        file_size_mb = 0
+        if os.path.exists(filter_file_txt):
+            file_size_mb = os.path.getsize(filter_file_txt) / (1024 * 1024)
+        elif os.path.exists(filter_file_gz):
+            file_size_mb = os.path.getsize(filter_file_gz) / (1024 * 1024)
+        
+        # 对于大于100MB的文件，优先使用Tabix索引
+        if file_size_mb > 100 and pysam and os.path.exists(filter_file_gz) and os.path.exists(tabix_tbi):
             try:
-                logger.info(f"Using Tabix-indexed database for fast access: {filter_file_gz}")
+                logger.info(f"Using Tabix-indexed database for fast access: {filter_file_gz} ({file_size_mb:.1f}MB)")
                 tbx = pysam.TabixFile(filter_file_gz)
                 # Return a lightweight handler
                 return {
@@ -1783,6 +1993,8 @@ class AnnotateVariation:
             except Exception as e:
                 logger.warning(f"Failed to open Tabix database, falling back to full load: {e}")
                 # fallthrough to full load
+        elif file_size_mb > 100:
+            logger.info(f"Large database detected ({file_size_mb:.1f}MB), but no Tabix index found. Consider building index for better performance.")
         
         # Fall back to loading into memory (for small/medium files)
         filter_db: Dict[str, str] = {}
@@ -2171,6 +2383,10 @@ class AnnotateVariation:
     def _get_standard_transcript_id(self, gene_name: str, transcript_id: str, protocol: str) -> str:
         """Get the standard transcript ID"""
         try:
+            # Only use MANE transcript filtering if use_mane_transcript is True
+            if not self.use_mane_transcript:
+                return transcript_id
+            
             # Process the gene name based on the protocol type
             if protocol == 'refGene':
                 # refGene: use the gene name directly
@@ -2187,9 +2403,25 @@ class AnnotateVariation:
             
             # Find MANE transcript (using the preloaded mapping)
             if gene_id in self.mane_transcripts:
-                return self.mane_transcripts[gene_id]
+                mane_info = self.mane_transcripts[gene_id]
+                
+                # Get the base transcript ID (without version) for matching
+                base_transcript_id = transcript_id.split('.')[0] if '.' in transcript_id else transcript_id
+                
+                # Check if current transcript matches MANE transcript (by base ID)
+                if protocol == 'refGene' and mane_info.get('base_refseq') == base_transcript_id:
+                    logger.info(f"Using MANE RefSeq transcript {mane_info['refseq']} for gene {gene_id}")
+                    return mane_info['refseq']
+                elif protocol == 'ensGene' and mane_info.get('base_ensembl') == base_transcript_id:
+                    logger.info(f"Using MANE Ensembl transcript {mane_info['ensembl']} for gene {gene_id}")
+                    return mane_info['ensembl']
+                else:
+                    # If no exact match, return the original transcript ID
+                    logger.info(f"No matching MANE transcript found for gene {gene_id}, using original transcript {transcript_id}")
+                    return transcript_id
             else:
                 # If the MANE transcript is not found, return the original transcript ID
+                logger.info(f"No MANE transcript found for gene {gene_id}, using original transcript {transcript_id}")
                 return transcript_id
                 
         except Exception as e:
@@ -2204,14 +2436,59 @@ class AnnotateVariation:
             with open(mane_file, 'r', encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
-                    if not line:
+                    if not line or line.startswith('#'):
                         continue
                     
                     parts = line.split('\t')
-                    if len(parts) >= 2:
+                    if len(parts) >= 3:
+                        # 三列格式：gene_id, refseq_id, ensembl_id
                         gene_id = parts[0]
-                        transcript_id = parts[1]
-                        mane_transcripts[gene_id] = transcript_id
+                        refseq_id = parts[1]
+                        ensembl_id = parts[2]
+                        
+                        if gene_id and refseq_id:
+                            # Store both RefSeq and Ensembl transcript IDs
+                            base_refseq = refseq_id.split('.')[0] if '.' in refseq_id else refseq_id
+                            base_ensembl = ensembl_id.split('.')[0] if ensembl_id and '.' in ensembl_id else ensembl_id
+                            
+                            mane_transcripts[gene_id] = {
+                                'refseq': refseq_id,
+                                'ensembl': ensembl_id,
+                                'base_refseq': base_refseq,
+                                'base_ensembl': base_ensembl
+                            }
+                    elif len(parts) >= 9:
+                        # GTF格式：chr, source, feature, start, end, score, strand, frame, attributes
+                        attributes = parts[8]
+                        
+                        # Parse the attribute field
+                        gene_id = None
+                        transcript_id = None
+                        ensembl_transcript_id = None
+                        
+                        for attr in attributes.split(';'):
+                            attr = attr.strip()
+                            if attr.startswith('gene_id'):
+                                gene_id = attr.split('"')[1] if '"' in attr else attr.split()[1]
+                            elif attr.startswith('transcript_id'):
+                                transcript_id = attr.split('"')[1] if '"' in attr else attr.split()[1]
+                            elif attr.startswith('db_xref') and 'Ensembl:' in attr:
+                                # Extract Ensembl transcript ID
+                                ensembl_part = attr.split('Ensembl:')[1].split('"')[0] if '"' in attr else attr.split('Ensembl:')[1]
+                                ensembl_transcript_id = ensembl_part
+                        
+                        if gene_id and transcript_id:
+                            # Store both RefSeq and Ensembl transcript IDs
+                            # Use the base transcript ID (without version) as key for matching
+                            base_transcript_id = transcript_id.split('.')[0] if '.' in transcript_id else transcript_id
+                            base_ensembl_id = ensembl_transcript_id.split('.')[0] if ensembl_transcript_id and '.' in ensembl_transcript_id else ensembl_transcript_id
+                            
+                            mane_transcripts[gene_id] = {
+                                'refseq': transcript_id,
+                                'ensembl': ensembl_transcript_id,
+                                'base_refseq': base_transcript_id,
+                                'base_ensembl': base_ensembl_id
+                            }
             
             logger.info(f"Loaded {len(mane_transcripts)} MANE transcript mappings")
         except Exception as e:
@@ -2423,11 +2700,11 @@ class AnnotateVariation:
             
             # Generate the HGVS format
             if len(ref_seq) == 1 and len(alt_seq) == 1:
-                hgvs = f"{standard_transcript_id}:c.{reference_exon}{sign}{offset}{ref_seq}>{alt_seq}"
+                hgvs = f"{standard_transcript_id}:c.{reference_exon}{sign}{offset}{ref_seq}>{alt_seq}:p.?"
             else:
-                hgvs = f"{standard_transcript_id}:c.{reference_exon}{sign}{offset}delins{alt_seq}"
+                hgvs = f"{standard_transcript_id}:c.{reference_exon}{sign}{offset}delins{alt_seq}:p.?"
         else:
-            hgvs = f"{standard_transcript_id}:intronic"
+            hgvs = f"{standard_transcript_id}:intronic:p.?"
         
         return hgvs
 
@@ -2513,6 +2790,7 @@ def main():
     parser.add_argument('-memfree', type=int, help='Available memory')
     parser.add_argument('-memtotal', type=int, help='Total memory')
     parser.add_argument('-mane_file', type=str, help='MANE transcript mapping file')
+    parser.add_argument('-use_mane_transcript', action='store_true', help='Use MANE transcript filtering')
     # Intronic dup online recognition
     parser.add_argument('--intronic_dup_remote', action='store_true', help='Use Ensembl REST to recognize intronic dup')
     parser.add_argument('--intronic_dup_window', type=int, default=50, help='Intronic dup recognition left window size')
@@ -2587,6 +2865,7 @@ def main():
         memfree=args.memfree,
         memtotal=args.memtotal,
         mane_file=args.mane_file,
+        use_mane_transcript=args.use_mane_transcript,
         intronic_dup_remote=args.intronic_dup_remote,
         intronic_dup_window=args.intronic_dup_window,
         _sift_threshold_explicitly_set=sift_threshold_explicitly_set,

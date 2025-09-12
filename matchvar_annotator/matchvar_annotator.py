@@ -103,7 +103,7 @@ class MatchvarRunner:
             'category': 'gene_info'
         },
         
-        # Frequency databases
+        # 频率数据库
         'exac03': {
             'operation': 'f',
             'description': 'ExAC exome frequency data',
@@ -140,7 +140,7 @@ class MatchvarRunner:
             'category': 'database'
         },
         
-        # Functional prediction software
+        # 功能预测软件
         'avsift': {
             'operation': 'f',
             'description': 'SIFT function prediction',
@@ -170,26 +170,33 @@ class MatchvarRunner:
 
     def __init__(self, resources_dir: str = None, input_files_dir: str = None, genome_version: str = 'hg19', thread_count: int = 4):
         """Initialize MATCHVAR runner with custom resources directory and genome version support"""
-        self.resources_dir = resources_dir or os.path.join(os.path.dirname(__file__), '..', 'resources')
+        if resources_dir:
+            self.resources_dir = resources_dir
+        else:
+            # 获取项目根目录
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(os.path.dirname(current_dir))  # 从utils/matchvar回到项目根目录
+            self.resources_dir = os.path.join(project_root, 'resources')
+        
         self.path_humandb = os.path.join(self.resources_dir, 'humandb')
         
-        # Use the incoming input file directory, if not provided, use the default value
+        # 使用传入的输入文件目录，如果没有传入则使用默认值
         self.input_files = input_files_dir or os.path.join(self.resources_dir, 'input_files')
         
-        # MATCHVAR file is in the utils/matchvar directory, not in the resources directory
-        self.matchvar_path = os.path.dirname(__file__)  # The current file is in the utils/matchvar directory
+        # MATCHVAR文件在utils/matchvar目录中，不在resources目录中
+        self.matchvar_path = os.path.dirname(__file__)  # 当前文件就在utils/matchvar目录中
         self.python_table_matchvar = os.path.join(self.matchvar_path, 'table_matchvar.py')
         
-        # Set genome version and thread count
+        # 设置基因组版本和线程数
         self.genome_version = genome_version
         self.thread_count = int(thread_count) if thread_count else 4
-        print(f"Initialize MATCHVAR annotator, genome version: {self.genome_version}, thread count: {self.thread_count}")
+        print(f"初始化MATCHVAR注释器，基因组版本: {self.genome_version}, 线程数: {self.thread_count}")
         
-        # Ensure directory exists
+        # 确保目录存在
         os.makedirs(self.path_humandb, exist_ok=True)
         os.makedirs(self.input_files, exist_ok=True)
         
-        # Check custom database directory
+        # 检查自定义数据库目录
         self.custom_db_dir = os.path.join(self.resources_dir, 'custom_databases')
         os.makedirs(self.custom_db_dir, exist_ok=True)
 
@@ -197,30 +204,30 @@ class MatchvarRunner:
         """Get custom databases configuration based on genome version"""
         custom_databases = {}
         
-        # Check custom database directory in humandb directory
-        if os.path.exists(self.path_humandb):
-            for filename in os.listdir(self.path_humandb):
-                # Select database file according to genome version
+        # 检查custom_databases目录中的自定义数据库
+        if os.path.exists(self.custom_db_dir):
+            for filename in os.listdir(self.custom_db_dir):
+                # 根据基因组版本选择对应的数据库文件
                 expected_prefix = f"{self.genome_version}_"
                 if filename.startswith(expected_prefix) and filename.endswith('.txt'):
-                    # Check if it is a custom database (not in standard protocol configuration)
-                    db_name = filename[len(expected_prefix):-4]  # Remove genome version prefix and '.txt'
+                    # 检查是否是自定义数据库（不在标准协议配置中）
+                    db_name = filename[len(expected_prefix):-4]  # 去掉基因组版本前缀和 '.txt'
                     if db_name not in self.PROTOCOL_CONFIGS:
-                        file_path = os.path.join(self.path_humandb, filename)
+                        file_path = os.path.join(self.custom_db_dir, filename)
                         
-                        # Verify file format is correct (at least contains Chr, Start, End, Ref, Alt columns)
+                        # 验证文件格式是否正确（至少包含Chr, Start, End, Ref, Alt列）
                         try:
                             with open(file_path, 'r', encoding='utf-8') as f:
                                 first_line = f.readline().strip()
                                 if first_line.startswith('#'):
-                                    # Skip comment line, read second line
+                                    # 跳过注释行，读取第二行
                                     second_line = f.readline().strip()
                                     if second_line:
-                                        # Check if there are enough columns (at least 5 columns: Chr, Start, End, Ref, Alt)
+                                        # 检查是否有足够的列（至少5列：Chr, Start, End, Ref, Alt）
                                         cols = second_line.split('\t')
                                         if len(cols) >= 5:
                                             custom_databases[db_name] = {
-                                                'operation': 'f',  # Default use frequency operation
+                                                'operation': 'f',  # 默认使用频率操作
                                                 'description': f'Custom Database: {db_name} ({self.genome_version})',
                                                 'category': 'custom_database',
                                                 'is_custom': True,
@@ -228,10 +235,44 @@ class MatchvarRunner:
                                                 'file_path': file_path
                                             }
                         except Exception as e:
-                            print(f"Error validating custom database file {filename}: {e}")
+                            print(f"验证自定义数据库文件 {filename} 时出错: {e}")
                             continue
         
-        print(f"Found {len(custom_databases)} custom database files (genome version: {self.genome_version})")
+        # 也检查humandb目录中的自定义数据库（向后兼容）
+        if os.path.exists(self.path_humandb):
+            for filename in os.listdir(self.path_humandb):
+                # 根据基因组版本选择对应的数据库文件
+                expected_prefix = f"{self.genome_version}_"
+                if filename.startswith(expected_prefix) and filename.endswith('.txt'):
+                    # 检查是否是自定义数据库（不在标准协议配置中）
+                    db_name = filename[len(expected_prefix):-4]  # 去掉基因组版本前缀和 '.txt'
+                    if db_name not in self.PROTOCOL_CONFIGS and db_name not in custom_databases:
+                        file_path = os.path.join(self.path_humandb, filename)
+                        
+                        # 验证文件格式是否正确（至少包含Chr, Start, End, Ref, Alt列）
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                first_line = f.readline().strip()
+                                if first_line.startswith('#'):
+                                    # 跳过注释行，读取第二行
+                                    second_line = f.readline().strip()
+                                    if second_line:
+                                        # 检查是否有足够的列（至少5列：Chr, Start, End, Ref, Alt）
+                                        cols = second_line.split('\t')
+                                        if len(cols) >= 5:
+                                            custom_databases[db_name] = {
+                                                'operation': 'f',  # 默认使用频率操作
+                                                'description': f'Custom Database: {db_name} ({self.genome_version})',
+                                                'category': 'custom_database',
+                                                'is_custom': True,
+                                                'filename': filename,
+                                                'file_path': file_path
+                                            }
+                        except Exception as e:
+                            print(f"验证自定义数据库文件 {filename} 时出错: {e}")
+                            continue
+        
+        print(f"找到 {len(custom_databases)} 个自定义数据库文件 (基因组版本: {self.genome_version})")
         return custom_databases
 
     def get_enhanced_protocol_configs(self) -> Dict[str, Dict]:
@@ -261,7 +302,7 @@ class MatchvarRunner:
         # Verify protocols
         is_valid, errors = self.validate_protocols(protocols)
         if not is_valid:
-            raise ValueError(f"Protocol validation failed: {'; '.join(errors)}")
+            raise ValueError(f"Protocol验证失败: {'; '.join(errors)}")
         
         # Get enhanced configurations
         enhanced_configs = self.get_enhanced_protocol_configs()
@@ -276,7 +317,7 @@ class MatchvarRunner:
         operation_str = ','.join(operations)
         
         # Build argument parameters (for most protocols, argument is empty)
-        arguments = ['' for _ in protocols]  # Use empty string as default parameter
+        arguments = ['' for _ in protocols]  # 使用空字符串作为默认参数
         argument_str = ','.join(arguments)
         
         # Ensure all paths are absolute paths
@@ -295,39 +336,43 @@ class MatchvarRunner:
             '-operation', operation_str
         ]
         
-        # Add argument parameter (if not empty)
+        # 添加argument参数（如果非空）
         if argument_str and argument_str != '.':
             cmd_parts.extend(['-argument', argument_str])
         
         # Add MANE transcript filtering if requested
+        print(f"=== matchvar_annotator.py 调试 ===")
+        print(f"additional_args: {additional_args}")
+        print(f"use_mane_transcript: {additional_args.get('use_mane_transcript') if additional_args else None}")
         if additional_args and additional_args.get('use_mane_transcript'):
             mane_file = os.path.join(humandb_abs, 'mane_transcript.txt')
             if os.path.exists(mane_file):
                 cmd_parts.extend(['-mane_file', mane_file])
-                print(f"Add MANE transcript filtering: {mane_file}")
+                cmd_parts.extend(['-use_mane_transcript'])
+                print(f"✅ 添加MANE转录本过滤: {mane_file}")
             else:
-                print(f"Warning: MANE transcript file does not exist: {mane_file}")
+                print(f"❌ 警告: MANE转录本文件不存在: {mane_file}")
+        else:
+            print(f"ℹ️  未启用MANE转录本过滤")
         
         # Add otherinfo parameter for complete annotation information
         cmd_parts.append('-otherinfo')
-        print("Add -otherinfo parameter to get complete annotation information")
+        print("添加-otherinfo参数以获取完整注释信息")
         
         # Add thread count parameter
         cmd_parts.extend(['-thread', str(self.thread_count)])
-        print(f"Add thread count parameter: {self.thread_count}")
+        print(f"添加线程数参数: {self.thread_count}")
         
-        # Check if there are custom databases, if there are, we need to handle them specially
+        # 检查是否有自定义数据库，如果有，需要特殊处理
         custom_db_protocols = []
         for protocol in protocols:
             if enhanced_configs[protocol].get('is_custom'):
                 custom_db_protocols.append(protocol)
         
         if custom_db_protocols:
-            print(f"Found custom database protocol: {custom_db_protocols}")
-            # For custom databases, we need to ensure they are handled correctly
-            # Currently MATCHVAR may not support using custom databases as standard protocols
-            # We may need to use other methods, such as converting custom databases to standard format
-            print("Warning: Custom databases may not be handled correctly because of MATCHVAR's limitations")
+            print(f"发现自定义数据库协议: {custom_db_protocols}")
+            # 将自定义数据库文件复制到humandb目录中，以便MATCHVAR能够处理
+            self._prepare_custom_databases_for_matchvar(custom_db_protocols, enhanced_configs)
         
         # Add additional arguments if provided
         if additional_args:
@@ -339,6 +384,33 @@ class MatchvarRunner:
                     cmd_parts.extend([f'-{key}', str(value)])
         
         return ' '.join(cmd_parts)
+    
+    def _prepare_custom_databases_for_matchvar(self, custom_db_protocols: List[str], enhanced_configs: Dict[str, Dict]):
+        """
+        为MATCHVAR准备自定义数据库文件
+        
+        Args:
+            custom_db_protocols: 自定义数据库协议列表
+            enhanced_configs: 增强的协议配置
+        """
+        try:
+            for protocol in custom_db_protocols:
+                config = enhanced_configs[protocol]
+                source_file = config['file_path']
+                target_file = os.path.join(self.path_humandb, config['filename'])
+                
+                # 如果目标文件不存在或源文件更新，则复制文件
+                if not os.path.exists(target_file) or os.path.getmtime(source_file) > os.path.getmtime(target_file):
+                    import shutil
+                    shutil.copy2(source_file, target_file)
+                    print(f"已将自定义数据库 {protocol} 复制到 humandb 目录: {target_file}")
+                else:
+                    print(f"自定义数据库 {protocol} 已存在于 humandb 目录中")
+                    
+        except Exception as e:
+            print(f"准备自定义数据库时出错: {e}")
+            import traceback
+            traceback.print_exc()
     
     def run_matchvar(self, input_file: str, protocols: List[str] = None, 
                    buildver: str = 'hg19', output_prefix: str = 'matchvar_result',
@@ -364,16 +436,16 @@ class MatchvarRunner:
         
         # Log MANE transcript setting
         if additional_args and additional_args.get('use_mane_transcript'):
-            print("Enable MANE transcript filtering mode")
+            print("启用MANE转录本过滤模式")
         else:
-            print("Use all transcript annotation mode")
+            print("使用所有转录本注释模式")
         
         try:
             # Check the input file type
             input_path = os.path.join(self.input_files, input_file)
             is_vcf = input_file.lower().endswith('.vcf')
             
-            # Clean up possible .orig files to avoid renaming conflicts
+            # 清理可能存在的.orig文件，避免重命名冲突
             self._cleanup_orig_files(output_prefix)
             
             # Convert VCF to MATCHVAR format if needed
@@ -398,12 +470,12 @@ class MatchvarRunner:
                 try:
                     result_df = self._process_matchvar_results(output_prefix, protocols)
                     if result_df is not None:
-                        print(f"Successfully processed MATCHVAR results, containing {len(result_df)} rows")
+                        print(f"成功处理MATCHVAR结果，包含 {len(result_df)} 行数据")
                     else:
-                        print("MATCHVAR results processing failed, returning None")
+                        print("MATCHVAR结果处理失败，返回None")
                     return result_df
                 except Exception as e:
-                    print(f"Error processing MATCHVAR results: {e}")
+                    print(f"处理MATCHVAR结果时出错: {e}")
                     import traceback
                     traceback.print_exc()
                     return None
@@ -420,85 +492,85 @@ class MatchvarRunner:
     
     def _cleanup_orig_files(self, output_prefix: str):
         """
-        Clean up possible .orig files to avoid renaming conflicts
+        清理可能存在的.orig文件，避免重命名冲突
         
         Args:
-            output_prefix: output file prefix
+            output_prefix: 输出文件前缀
         """
         try:
-            # Find all possible .orig files
+            # 查找所有可能的.orig文件
             for protocol in self.PROTOCOL_CONFIGS.keys():
                 orig_file = os.path.join(self.input_files, f"{output_prefix}.{protocol}.exonic_variant_function.orig")
                 if os.path.exists(orig_file):
-                    print(f"Clean up existing .orig file: {orig_file}")
+                    print(f"清理已存在的.orig文件: {orig_file}")
                     os.remove(orig_file)
                     
-            # Also clean up other possible .orig files
+            # 也清理其他可能的.orig文件
             for filename in os.listdir(self.input_files):
                 if filename.endswith('.orig') and output_prefix in filename:
                     orig_file = os.path.join(self.input_files, filename)
-                    print(f"Clean up existing .orig file: {orig_file}")
+                    print(f"清理已存在的.orig文件: {orig_file}")
                     os.remove(orig_file)
                     
         except Exception as e:
-            print(f"Error cleaning .orig file: {e}")
-            # Do not throw exception, continue execution
+            print(f"清理.orig文件时出错: {e}")
+            # 不抛出异常，继续执行
     
     def _execute_with_process_management(self, command: str, timeout: int = 600):
         """
-        Execute command and manage processes
+        执行命令并进行进程管理
         
         Args:
-            command: command to execute
-            timeout: timeout time (seconds), default 10 minutes
+            command: 要执行的命令
+            timeout: 超时时间（秒），默认10分钟
             
         Returns:
-            Execution result
+            执行结果
         """
         process = None
         try:
-            # Start process - directly output to console, keep original output format
+            # 启动进程 - 直接输出到控制台，保持原来的输出格式
             process = subprocess.Popen(
                 command,
                 shell=True,
-                stdout=None,  # Directly output to console
-                stderr=None,  # Directly output to console
+                stdout=None,  # 直接输出到控制台
+                stderr=None,  # 直接输出到控制台
                 text=True,
                 encoding=get_system_encoding(),
                 errors='replace'
             )
             
-            print(f"MATCHVAR process started, PID: {process.pid}")
+            print(f"MATCHVAR进程已启动，PID: {process.pid}")
             
-            # Wait for process to complete, with timeout control
+            # 等待进程完成，带超时控制
             try:
                 process.wait(timeout=timeout)
-                print(f"MATCHVAR process completed normally, return code: {process.returncode}")
+                print(f"MATCHVAR进程正常完成，返回码: {process.returncode}")
             except subprocess.TimeoutExpired:
-                print(f"MATCHVAR process timed out ({timeout} seconds), force termination")
+                print(f"MATCHVAR进程超时（{timeout}秒），强制终止")
                 process.terminate()
                 try:
-                    process.wait(timeout=10)  # Give process 10 seconds to gracefully exit
+                    process.wait(timeout=10)  # 给进程10秒时间优雅退出
                 except subprocess.TimeoutExpired:
-                    print(f"Force kill MATCHVAR process: PID {process.pid}")
+                    print(f"强制杀死MATCHVAR进程: PID {process.pid}")
                     process.kill()
                     process.wait()
-                raise TimeoutError(f"MATCHVAR execution timed out ({timeout} seconds)")
+                raise TimeoutError(f"MATCHVAR执行超时（{timeout}秒）")
             
-            # Create result object - since output is directly to console, create empty result here
+            # 创建结果对象 - 由于输出直接到控制台，这里创建空的结果
             result = subprocess.CompletedProcess(
                 args=command,
                 returncode=process.returncode,
-                stdout="",  # Output is already directly displayed on console
-                stderr=""   # Output is already directly displayed on console
+                stdout="",  # 输出已经直接显示在控制台
+                stderr=""   # 输出已经直接显示在控制台
             )
             
-            print(f"MATCHVAR process completed, return code: {result.returncode}")
+            print(f"MATCHVAR进程已完成，返回码: {result.returncode}")
             return result
             
         except Exception as e:
-            print(f"Error executing MATCHVAR command: {e}")
-            # Create error result
+            print(f"执行MATCHVAR命令时出错: {e}")
+            # 创建错误结果
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=-1,
@@ -506,74 +578,74 @@ class MatchvarRunner:
                 stderr=str(e)
             )
         finally:
-            # Ensure process is cleaned up
+            # 确保进程被清理
             if process and process.poll() is None:
-                print(f"Force terminate MATCHVAR process: PID {process.pid}")
+                print(f"强制终止MATCHVAR进程: PID {process.pid}")
                 try:
                     process.terminate()
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    print(f"Force kill MATCHVAR process: PID {process.pid}")
+                    print(f"强制杀死MATCHVAR进程: PID {process.pid}")
                     process.kill()
                 except Exception as e:
-                    print(f"Error cleaning process: {e}")
+                    print(f"清理进程时出错: {e}")
             
-            # Clean up possible child processes
+            # 清理可能的子进程
             self._cleanup_child_processes()
     
     def _cleanup_child_processes(self):
         """
-        Clean up possible child processes
+        清理可能的子进程
         """
         try:
             current_pid = os.getpid()
             current_process = psutil.Process(current_pid)
             
-            # Find current process's children
+            # 查找当前进程的子进程
             children = current_process.children(recursive=True)
             
             for child in children:
                 try:
-                    # Check if it is a MATCHVAR related process
+                    # 检查是否是MATCHVAR相关的进程
                     if any(keyword in child.name().lower() for keyword in ['python', 'matchvar', 'perl']):
-                        print(f"Clean up child process: PID {child.pid}, name: {child.name()}")
+                        print(f"清理子进程: PID {child.pid}, 名称: {child.name()}")
                         child.terminate()
                         
-                        # Wait for process to terminate
+                        # 等待进程终止
                         try:
                             child.wait(timeout=5)
                         except psutil.TimeoutExpired:
-                            print(f"Force kill child process: PID {child.pid}")
+                            print(f"强制杀死子进程: PID {child.pid}")
                             child.kill()
                             
                 except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-                    print(f"Cannot clean up child process: {e}")
+                    print(f"无法清理子进程: {e}")
                     
         except Exception as e:
-            print(f"Error cleaning child process: {e}")
+            print(f"清理子进程时出错: {e}")
     
     def _process_matchvar_results(self, output_prefix: str, protocols: List[str]) -> Optional[pd.DataFrame]:
         """
-        Process MATCHVAR execution results, including custom database post-processing
+        处理MATCHVAR执行结果，包括自定义数据库的后处理
         
         Args:
-            output_prefix: output file prefix
-            protocols: used protocol list
+            output_prefix: 输出文件前缀
+            protocols: 使用的协议列表
             
         Returns:
-            Annotation result DataFrame
+            注释结果DataFrame
         """
         try:
-            # Find output files
+            # 查找输出文件
             output_files = []
             
-            # Find TSV format output files according to genome version
+            # 根据基因组版本查找TSV格式的输出文件
             tsv_file = f"{output_prefix}.{self.genome_version}_multianno.tsv"
             tsv_path = os.path.join(self.input_files, tsv_file)
             if os.path.exists(tsv_path):
                 output_files.append(tsv_path)
             
-            # If TSV file does not exist, find current directory
+            # 如果TSV文件不存在，查找当前目录
             if not output_files:
                 tsv_path = tsv_file
                 if os.path.exists(tsv_path):
@@ -582,102 +654,102 @@ class MatchvarRunner:
             if output_files:
                 output_path = output_files[0]
                 file_size = os.path.getsize(output_path)
-                print(f"Find MATCHVAR output file: {output_path}, file size: {file_size} bytes")
+                print(f"找到MATCHVAR输出文件: {output_path}, 文件大小: {file_size} bytes")
                 
-                # Read result file
+                # 读取结果文件
                 try:
-                    # Use more strict TSV reading method
+                    # 使用更严格的TSV读取方式
                     result_df = pd.read_csv(output_path, sep='\t', low_memory=False,
                                           na_values=[], keep_default_na=False,
                                           encoding='utf-8', quoting=3)  # quoting=3 means no quoting
                     
-                    # Verify if basic columns exist
+                    # 验证基本列是否存在
                     required_columns = ['Chr', 'Start', 'End', 'Ref', 'Alt']
                     missing_columns = [col for col in required_columns if col not in result_df.columns]
                     
                     if missing_columns:
-                        print(f"Warning: TSV file missing required columns: {missing_columns}")
-                        print(f"Actual column names: {list(result_df.columns)[:10]}")
+                        print(f"警告：TSV文件缺少必需的列: {missing_columns}")
+                        print(f"实际列名: {list(result_df.columns)[:10]}")
                         return None
                     
-                    # Verify data completeness: check first few rows
+                    # 验证数据完整性：检查前几行数据
                     for idx in range(min(3, len(result_df))):
                         row = result_df.iloc[idx]
                         chr_val = str(row.get('Chr', ''))
                         alt_val = str(row.get('Alt', ''))
                         
-                        # Check if Alt field contains functional annotation instead of base sequence
+                        # 检查Alt字段是否包含功能注释而不是碱基
                         if alt_val in ['exonic', 'intronic', 'intergenic', 'utr5', 'utr3', 'splicing']:
-                            print(f"Detected column misalignment problem: Row {idx+1} Alt={alt_val}, not base sequence")
-                            print(f"Row data: Chr={chr_val}, Alt={alt_val}")
-                            # Try to reparse file
-                            print("Trying different parsing method...")
+                            print(f"检测到列错位问题：第{idx+1}行 Alt={alt_val}，这不是碱基序列")
+                            print(f"行数据: Chr={chr_val}, Alt={alt_val}")
+                            # 尝试重新解析文件
+                            print("尝试使用不同的解析方式...")
                             try:
                                 result_df = pd.read_csv(output_path, sep='\t', low_memory=False,
                                                       na_values=[], keep_default_na=False,
                                                       encoding='utf-8-sig', engine='python')
-                                # Re-verify
+                                # 重新验证
                                 test_row = result_df.iloc[0]
                                 test_alt = str(test_row.get('Alt', ''))
                                 if test_alt in ['exonic', 'intronic', 'intergenic', 'utr5', 'utr3', 'splicing']:
-                                    print("Re-parsing still has problems, returning None")
+                                    print("重新解析仍有问题，返回None")
                                     return None
                                 else:
-                                    print("Re-parsing successful")
+                                    print("重新解析成功")
                                     break
                             except Exception as e:
-                                print(f"Re-parsing failed: {e}")
+                                print(f"重新解析失败: {e}")
                                 return None
                     
-                    # Replace all NaN values with empty string
+                    # 将所有的NaN值替换为空字符串
                     result_df = result_df.fillna('')
-                    print(f"Successfully read TSV file, containing {len(result_df)} rows of data")
+                    print(f"成功读取TSV文件，包含 {len(result_df)} 行数据")
                     
-                    # Display first few rows of key columns for debugging
+                    # 显示前几行的关键列以供调试
                     if len(result_df) > 0:
                         sample_data = result_df[['Chr', 'Start', 'End', 'Ref', 'Alt']].head(3)
-                        print("First 3 rows of basic data:")
+                        print("前3行基本数据:")
                         for idx, row in sample_data.iterrows():
-                            print(f"  Row {idx+1}: Chr={row['Chr']}, Start={row['Start']}, End={row['End']}, Ref={row['Ref']}, Alt={row['Alt']}")
+                            print(f"  行{idx+1}: Chr={row['Chr']}, Start={row['Start']}, End={row['End']}, Ref={row['Ref']}, Alt={row['Alt']}")
                     
-                    # Process custom database annotations
+                    # 处理自定义数据库注释
                     try:
                         result_df = self._add_custom_database_annotations(result_df, protocols)
-                        print("Custom database annotations processed successfully")
+                        print("自定义数据库注释处理完成")
                     except Exception as e:
-                        print(f"Error processing custom database annotations: {e}")
+                        print(f"处理自定义数据库注释时出错: {e}")
                         import traceback
                         traceback.print_exc()
-                        # Even if custom database processing fails, return the original result
-                        print("Continue using original MATCHVAR results")
+                        # 即使自定义数据库处理失败，也返回原始结果
+                        print("继续使用原始MATCHVAR结果")
                     
                     return result_df
                 except Exception as e:
-                    print(f"Failed to read TSV file: {e}")
+                    print(f"读取TSV文件失败: {e}")
                     return None
             else:
-                print(f"MATCHVAR output file not found: {tsv_file}")
+                print(f"未找到MATCHVAR输出文件: {tsv_file}")
                 return None
                 
         except Exception as e:
-            print(f"Error processing MATCHVAR results: {e}")
+            print(f"处理MATCHVAR结果时出错: {e}")
             return None
     
     def _add_custom_database_annotations(self, result_df: pd.DataFrame, protocols: List[str]) -> pd.DataFrame:
         """
-        Add custom database annotations to the result DataFrame
+        为结果DataFrame添加自定义数据库注释
         
         Args:
-            result_df: MATCHVAR result DataFrame
-            protocols: used protocol list
+            result_df: MATCHVAR结果DataFrame
+            protocols: 使用的协议列表
             
         Returns:
-            DataFrame with custom database annotations
+            添加了自定义数据库注释的DataFrame
         """
         try:
             enhanced_configs = self.get_enhanced_protocol_configs()
             
-            # Find custom database protocols
+            # 查找自定义数据库协议
             custom_db_protocols = []
             for protocol in protocols:
                 if enhanced_configs[protocol].get('is_custom'):
@@ -686,38 +758,38 @@ class MatchvarRunner:
             if not custom_db_protocols:
                 return result_df
             
-            print(f"Start processing custom database annotations: {custom_db_protocols}")
+            print(f"开始处理自定义数据库注释: {custom_db_protocols}")
             
-            # Add annotations for each custom database
+            # 为每个自定义数据库添加注释
             for custom_db_name in custom_db_protocols:
                 custom_db_config = enhanced_configs[custom_db_name]
                 custom_db_path = custom_db_config['file_path']
                 
-                # Read custom database file
+                # 读取自定义数据库文件
                 custom_annotations = self._load_custom_database(custom_db_path)
                 
                 if custom_annotations:
-                    # Add custom database columns to the result DataFrame
+                    # 为结果DataFrame添加自定义数据库列
                     result_df = self._merge_custom_annotations(result_df, custom_annotations, custom_db_name)
-                    print(f"Successfully added custom database {custom_db_name} annotations")
+                    print(f"成功添加自定义数据库 {custom_db_name} 的注释")
                 else:
-                    print(f"Cannot load custom database {custom_db_name}")
+                    print(f"无法加载自定义数据库 {custom_db_name}")
             
             return result_df
             
         except Exception as e:
-            print(f"Error adding custom database annotations: {e}")
+            print(f"添加自定义数据库注释时出错: {e}")
             return result_df
     
     def _load_custom_database(self, db_path: str) -> Dict[str, Dict]:
         """
-        Load custom database file
+        加载自定义数据库文件
         
         Args:
-            db_path: custom database file path
+            db_path: 自定义数据库文件路径
             
         Returns:
-            Custom database annotations dictionary
+            自定义数据库注释字典
         """
         try:
             annotations = {}
@@ -725,7 +797,7 @@ class MatchvarRunner:
             with open(db_path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
                 
-                # Skip comment lines
+                # 跳过注释行
                 data_lines = [line.strip() for line in lines if not line.strip().startswith('#')]
                 
                 for line in data_lines:
@@ -734,7 +806,7 @@ class MatchvarRunner:
                     
                     parts = line.split('\t')
                     if len(parts) >= 5:
-                        # Create unique key: chr:start:end:ref:alt
+                        # 创建唯一键：chr:start:end:ref:alt
                         chr_pos = parts[0]
                         start = parts[1]
                         end = parts[2]
@@ -743,7 +815,7 @@ class MatchvarRunner:
                         
                         key = f"{chr_pos}:{start}:{end}:{ref}:{alt}"
                         
-                        # Store data for all columns
+                        # 存储所有列的数据
                         annotation_data = {
                             'chr': chr_pos,
                             'start': start,
@@ -752,39 +824,39 @@ class MatchvarRunner:
                             'alt': alt
                         }
                         
-                        # Add additional columns (if any)
+                        # 添加额外的列（如果有的话）
                         for i, value in enumerate(parts[5:], 5):
                             annotation_data[f'col_{i}'] = value
                         
                         annotations[key] = annotation_data
             
-            print(f"Loaded custom database, containing {len(annotations)} records")
+            print(f"加载自定义数据库，包含 {len(annotations)} 条记录")
             return annotations
             
         except Exception as e:
-            print(f"Failed to load custom database: {e}")
+            print(f"加载自定义数据库失败: {e}")
             return {}
     
     def _merge_custom_annotations(self, result_df: pd.DataFrame, custom_annotations: Dict[str, Dict], db_name: str) -> pd.DataFrame:
         """
-        Merge custom database annotations into the result DataFrame
+        将自定义数据库注释合并到结果DataFrame中
         
         Args:
-            result_df: result DataFrame
-            custom_annotations: custom database annotations
-            db_name: database name
+            result_df: 结果DataFrame
+            custom_annotations: 自定义数据库注释
+            db_name: 数据库名称
             
         Returns:
-            Merged DataFrame
+            合并后的DataFrame
         """
         try:
-            # Create new columns to store custom database annotations
+            # 创建新列来存储自定义数据库的注释
             result_df[f'{db_name}_found'] = ''
             result_df[f'{db_name}_data'] = ''
             
-            # Find matching custom database records for each row
+            # 为每一行查找匹配的自定义数据库记录
             for idx, row in result_df.iterrows():
-                # Create key to match custom database
+                # 创建键来匹配自定义数据库
                 chr_pos = str(row.get('Chr', ''))
                 start = str(row.get('Start', ''))
                 end = str(row.get('End', ''))
@@ -795,7 +867,7 @@ class MatchvarRunner:
                 
                 if key in custom_annotations:
                     result_df.at[idx, f'{db_name}_found'] = 'Yes'
-                    # Convert custom database data to string
+                    # 将自定义数据库的数据转换为字符串
                     custom_data = custom_annotations[key]
                     data_str = ';'.join([f"{k}={v}" for k, v in custom_data.items() if k not in ['chr', 'start', 'end', 'ref', 'alt']])
                     result_df.at[idx, f'{db_name}_data'] = data_str
@@ -805,7 +877,7 @@ class MatchvarRunner:
             return result_df
             
         except Exception as e:
-            print(f"Error merging custom database annotations: {e}")
+            print(f"合并自定义数据库注释时出错: {e}")
             return result_df
     
     def _convert_vcf_to_matchvar_input(self, vcf_file: str) -> Optional[str]:
