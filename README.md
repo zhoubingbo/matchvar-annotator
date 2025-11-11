@@ -503,7 +503,7 @@ python -c "import matchvar_annotator; print(f'Version: {matchvar_annotator.__ver
 
 Expected output:
 ```
-Version: 1.0.0
+Version: 1.1.2
 ```
 
 #### 2. Package Import Test
@@ -744,7 +744,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Changelog
 
-### v1.0.0 (2025-10-01)
+### v1.1.2 (2025-11-11)
+- Updated annotate_variation.py with improvements
+- Updated table_matchvar.py with enhancements
+- Bug fixes and performance optimizations
+
+### v1.1.1 (2025-09-12)
 - Initial version release
 - Support for basic variant annotation functionality
 - Provide command line interface
