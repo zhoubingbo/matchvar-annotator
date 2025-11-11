@@ -744,7 +744,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Changelog
 
-### v1.0.0 (2024-01-01)
+### v1.0.0 (2025-10-01)
 - Initial version release
 - Support for basic variant annotation functionality
 - Provide command line interface

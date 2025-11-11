@@ -146,7 +146,7 @@ class TableAnnotator:
         self.bedfile = kwargs.get('bedfile')  # BED file
         self.vcfdbfile = kwargs.get('vcfdbfile')  # VCF database file
         self.tempdir = kwargs.get('tempdir')  # Temporary directory
-        self.maxgenethread = kwargs.get('maxgenethread', 16)  # Maximum gene thread number
+        # self.maxgenethread = kwargs.get('maxgenethread', 16)  # Maximum gene thread number
         self.xreffile = kwargs.get('xreffile')  # Cross-reference file
         self.convertarg = kwargs.get('convertarg')  # Conversion parameters
         self.codingarg = kwargs.get('codingarg')  # Coding parameters
@@ -224,10 +224,10 @@ class TableAnnotator:
             if self.nastring is None:
                 self.nastring = '.'
 
-        # Verify thread parameters
-        if self.thread and self.thread > self.maxgenethread:
-            logger.info(f"NOTICE: number of threads is reduced to {self.maxgenethread}")
-            self.thread = self.maxgenethread
+        # # Verify thread parameters
+        # if self.thread and self.thread > self.maxgenethread:
+        #     logger.info(f"NOTICE: number of threads is reduced to {self.maxgenethread}")
+        #     self.thread = self.maxgenethread
         
         # Process protocols and operations
         self.protocols = [p.strip() for p in self.protocol.split(',')] if self.protocol else []
@@ -342,12 +342,20 @@ class TableAnnotator:
             logger.info("-----------------------------------------------------------------")
             logger.info(f"NOTICE: Processing operation={operation} protocol={protocol}")
             
-            if operation in ['g', 'gx']:
-                self._gene_operation(protocol, self.dbtype1[i], self.arguments[i] if i < len(self.arguments) else None, operation)
-            elif operation == 'r':
-                self._region_operation(protocol, self.dbtype1[i], self.arguments[i] if i < len(self.arguments) else None)
-            elif operation == 'f':
-                self._filter_operation(protocol, self.dbtype1[i], self.arguments[i] if i < len(self.arguments) else None)
+            try:
+                if operation in ['g', 'gx']:
+                    self._gene_operation(protocol, self.dbtype1[i], self.arguments[i] if i < len(self.arguments) else None, operation)
+                elif operation == 'r':
+                    self._region_operation(protocol, self.dbtype1[i], self.arguments[i] if i < len(self.arguments) else None)
+                elif operation == 'f':
+                    self._filter_operation(protocol, self.dbtype1[i], self.arguments[i] if i < len(self.arguments) else None)
+                
+                logger.info(f"Successfully completed protocol {protocol}")
+                
+            except Exception as e:
+                logger.error(f"Failed to process protocol {protocol}: {e}")
+                logger.warning(f"Continuing with next protocol...")
+                # Continue with the next protocol instead of stopping
     
     def _gene_operation(self, protocol: str, dbtype1: str, argument: str, operation: str):
         """Gene annotation operation"""
@@ -440,8 +448,8 @@ class TableAnnotator:
                             logger.error(f"coding_change failed, return code: {result_cc.returncode}")
                             logger.error(f"stdout: {getattr(result_cc, 'stdout', '')}")
                             logger.error(f"stderr: {getattr(result_cc, 'stderr', '')}")
-                        if result_cc.returncode != 0:
-                            raise RuntimeError(f"Error running system command: <{sc_cc}>")
+                            # Don't raise exception, just log the error and continue
+                            logger.warning(f"Polish step failed due to coding_change error, using unmodified exonic annotation")
 
                         # Record the temporary files to be cleaned up
                         self.unlink_files.append(f"{self.tempfile}.{protocol}.fa")
@@ -591,7 +599,7 @@ class TableAnnotator:
                                 self.varanno[varstring][f"ExonicFunc.{protocol}"] = exonic_function
                                 self.varanno[varstring][f"AAChange.{protocol}"] = aa_change_final
 
-                            # Calculate VarType (uniform口径：非移码= inframe)
+                            # Calculate VarType (uniform criteria: non-frameshift = inframe)
                             try:
                                 func_key = f"Func_{protocol}" if self.dot2underline else f"Func.{protocol}"
                                 vartype_key = f"VarType_{protocol}" if self.dot2underline else f"VarType.{protocol}"
@@ -1084,7 +1092,7 @@ class TableAnnotator:
                     
                     parts = line.split('\t')
                     if len(parts) >= 9:
-                        # GTF格式：chr, source, feature, start, end, score, strand, frame, attributes
+                        # GTF format: chr, source, feature, start, end, score, strand, frame, attributes
                         attributes = parts[8]
                         
                         # Parse the attribute field
@@ -1164,14 +1172,14 @@ class TableAnnotator:
 def main():
     """Main function"""
     examples = (
-        "示例:\n"
-        "1) 基于MV输入文件进行基因注释 + 区域注释 (TSV输出)\n"
+        "Examples:\n"
+        "1) Gene annotation + region annotation based on MV input file (TSV output)\n"
         "   python utils/matchvar/table_matchvar.py \\\n+        /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/202511.family.mvinput \\\n+        /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/humandb \\\n+        -outfile /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/matchvar \\\n+        -buildver hg19 -protocol refGene,cytoBand -operation g,r\n\n"
-        "2) 直接从VCF开始（内部会自动转换为MV输入），并保留原始信息列\n"
+        "2) Start directly from VCF (automatically converted to MV input internally), and retain original information columns\n"
         "   python utils/matchvar/table_matchvar.py \\\n+        /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/202511.family.vcf \\\n+        /Users/James/PycharmProjects/Variant_Data_Simulation_2.0/resources/humandb \\\n+        -vcfinput -otherinfo -outfile result -buildver hg19 \\\n+        -protocol refGene,exac03,avsift -operation g,f,f\n\n"
-        "3) 指定线程与NA占位符，输出到当前目录\n"
+        "3) Specify threads and NA placeholder, output to current directory\n"
         "   python utils/matchvar/table_matchvar.py input.mvinput resources/humandb \\\n+        -outfile out -thread 8 -nastring . -buildver hg19 \\\n+        -protocol refGene,clinvar -operation g,f\n\n"
-        "提示: 可通过设置环境变量 PYTHON_EXECUTABLE 指定子进程解释器；否则自动寻找项目 .venv 或回退到当前解释器。"
+        "Tip: You can specify the subprocess interpreter by setting the PYTHON_EXECUTABLE environment variable; otherwise, automatically find the project .venv or fall back to the current interpreter."
     )
     parser = argparse.ArgumentParser(
         description='MATCHVAR table annotation tool',
@@ -1195,7 +1203,7 @@ def main():
     parser.add_argument('-polishgene', action='store_true', help='Optimize gene annotation')
     parser.add_argument('-intronhgvs', action='store_true', help='Output intronic HGVSp')
     
-    # 添加新的重要参数
+    # Add new important parameters
     parser.add_argument('-verbose', '-v', action='store_true', help='Verbose output')
     parser.add_argument('-man', '-m', action='store_true', help='Display manual')
     parser.add_argument('-checkfile', action='store_true', help='Check file existence')
@@ -1205,7 +1213,7 @@ def main():
     parser.add_argument('-bedfile', type=str, help='BED file')
     parser.add_argument('-vcfdbfile', type=str, help='VCF database file')
     parser.add_argument('-tempdir', type=str, help='Temporary directory')
-    parser.add_argument('-maxgenethread', type=int, default=16, help='Maximum gene thread number')
+    # parser.add_argument('-maxgenethread', type=int, default=16, help='Maximum gene thread number')
     parser.add_argument('-xreffile', type=str, help='Cross-reference file')
     parser.add_argument('-convertarg', type=str, help='Conversion parameter')
     parser.add_argument('-codingarg', type=str, help='Coding parameter')
@@ -1245,7 +1253,7 @@ def main():
         bedfile=args.bedfile,
         vcfdbfile=args.vcfdbfile,
         tempdir=args.tempdir,
-        maxgenethread=args.maxgenethread,
+        # maxgenethread=args.maxgenethread,
         xreffile=args.xreffile,
         convertarg=args.convertarg,
         codingarg=args.codingarg,

@@ -83,7 +83,7 @@ class AnnotateVariation:
         self.filter = kwargs.get('filter', False)
         self.buildver = kwargs.get('buildver', 'hg19')
         self.thread = kwargs.get('thread')
-        self.maxgenethread = kwargs.get('maxgenethread', 4)
+        # self.maxgenethread = kwargs.get('maxgenethread', 4)
         self.mingenelinecount = kwargs.get('mingenelinecount', 1000000)
         self.splicing_threshold = kwargs.get('splicing_threshold', 2)  # Add splicing_threshold parameter
         self.indel_splicing_threshold = kwargs.get('indel_splicing_threshold')  # Add indel_splicing_threshold parameter
@@ -334,32 +334,51 @@ class AnnotateVariation:
                     logger.info(f"NOTICE: threading is disabled for gene-based annotation on file with less than {self.mingenelinecount} input lines")
                     self.thread = None
                 
-                if self.thread and self.thread > self.maxgenethread:
-                    logger.info(f"NOTICE: number of threads is reduced to {self.maxgenethread}")
-                    self.thread = self.maxgenethread
-                    queryfile_line_count, chunk_line_count = self._calculate_chunk_line(self.queryfile, self.thread)
+                # if self.thread and self.thread > self.maxgenethread:
+                #     logger.info(f"NOTICE: number of threads is reduced to {self.maxgenethread}")
+                #     self.thread = self.maxgenethread
+                #     queryfile_line_count, chunk_line_count = self._calculate_chunk_line(self.queryfile, self.thread)
         
         # Start main program
         if self.thread:
-            # 使用多线程实现
+            # Use multi-threading implementation
             self._run_multi_threaded_annotation(queryfile_line_count, chunk_line_count)
         else:
             self._run_single_threaded_annotation()
     
     def _calculate_chunk_line(self, queryfile: str, thread: int) -> Tuple[int, int]:
-        """Calculate chunk line count with optimized chunking strategy"""
+        """Calculate chunk line count with adaptive chunking strategy"""
         try:
             with open(queryfile, 'r', encoding='utf-8') as f:
                 line_count = sum(1 for line in f if line.strip() and not line.startswith('#'))
             
-            # 优化分块策略：对于大文件使用更大的块，减少线程间切换开销
+            # Adaptive chunking strategy: intelligently adjust chunk size based on file size and thread count
             if line_count < 1000:
+                # Small files: each thread processes at least 1 line
                 chunk_line_count = max(1, line_count // thread)
             elif line_count < 10000:
+                # Medium files: each thread processes at least 100 lines
                 chunk_line_count = max(100, line_count // thread)
+            elif line_count < 100000:
+                # Large files: each thread processes 1000-5000 lines
+                chunk_line_count = min(5000, line_count // thread)
+            elif line_count < 1000000:
+                # Very large files: each thread processes 5000-10000 lines
+                chunk_line_count = min(10000, line_count // thread)
             else:
-                # 对于大文件，使用更大的块大小，但不超过5000行
-                chunk_line_count = min(5000, max(1000, line_count // thread))
+                # Extra large files: each thread processes 10000-20000 lines
+                chunk_line_count = min(50000, line_count // thread)
+            
+            
+            # Calculate the actual number of rounds needed
+            total_chunks = (line_count + chunk_line_count - 1) // chunk_line_count
+            actual_rounds = (total_chunks + thread - 1) // thread
+            
+            logger.info(f"File size: {line_count:,} lines")
+            logger.info(f"Chunk size: {chunk_line_count:,} lines per chunk")
+            logger.info(f"Total chunks: {total_chunks:,}")
+            logger.info(f"Processing rounds: {actual_rounds:,}")
+            logger.info(f"Threads per round: {thread}")
             
             return line_count, chunk_line_count
         except Exception as e:
@@ -367,10 +386,8 @@ class AnnotateVariation:
             return 1000, 1000  # Default value
     
     def _run_multi_threaded_annotation(self, queryfile_line_count: int, chunk_line_count: int):
-        """Run multi-threaded annotation"""
-        threads = []
-        
-        # 预加载数据库，避免每个线程重复加载
+        """Run multi-threaded annotation with multiple rounds for large files"""
+        # Pre-load database to avoid repeated loading by each thread
         if self.geneanno:
             logger.info("Pre-loading gene database for multi-threading...")
             gene_db = self._load_gene_database()
@@ -381,46 +398,63 @@ class AnnotateVariation:
             logger.info("Pre-loading filter database for multi-threading...")
             filter_db = self._load_filter_database()
         
-        for i in range(self.thread):
-            start_line = i * chunk_line_count + 1
-            end_line = start_line + chunk_line_count - 1
-            if end_line > queryfile_line_count:
-                end_line = queryfile_line_count
-            
-            logger.info(f"NOTICE: Creating new threads for query line {start_line} to {end_line}")
-            
-            if self.geneanno:
-                thread = threading.Thread(
-                    target=self._annotate_query_by_gene_thread,
-                    args=(f"{self.outfile}.variant_function.{i}", 
-                          f"{self.outfile}.exonic_variant_function.{i}",
-                          f"{self.outfile}.invalid_input.{i}", 
-                          start_line, end_line, i, gene_db)
-                )
-            elif self.regionanno:
-                thread = threading.Thread(
-                    target=self._annotate_query_by_region_thread,
-                    args=(f"{self.outfile}.{self.buildver}_{self.dbtype1}.{i}",
-                          f"{self.outfile}.invalid_input.{i}",
-                          start_line, end_line, i, region_db)
-                )
-            elif self.filter:
-                thread = threading.Thread(
-                    target=self._filter_query_thread,
-                    args=(f"{self.outfile}.{self.buildver}_{self.dbtype1}_filtered.{i}",
-                          f"{self.outfile}.{self.buildver}_{self.dbtype1}_dropped.{i}",
-                          f"{self.outfile}.invalid_input.{i}",
-                          start_line, end_line, i, filter_db)
-                )
-            
-            threads.append(thread)
-            thread.start()
+        # Calculate the number of rounds needed for processing
+        total_chunks = (queryfile_line_count + chunk_line_count - 1) // chunk_line_count
+        rounds = (total_chunks + self.thread - 1) // self.thread  # Round up
         
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
+        logger.info(f"Processing {queryfile_line_count} lines in {rounds} rounds with {self.thread} threads per round")
         
-        # Merge results
+        for round_num in range(rounds):
+            logger.info(f"Starting round {round_num + 1}/{rounds}")
+            threads = []
+            
+            for i in range(self.thread):
+                chunk_index = round_num * self.thread + i
+                start_line = chunk_index * chunk_line_count + 1
+                end_line = start_line + chunk_line_count - 1
+                
+                if start_line > queryfile_line_count:
+                    break  # No more data to process
+                
+                if end_line > queryfile_line_count:
+                    end_line = queryfile_line_count
+                
+                logger.info(f"Round {round_num + 1}: Creating thread {i} for lines {start_line} to {end_line}")
+                
+                if self.geneanno:
+                    thread = threading.Thread(
+                        target=self._annotate_query_by_gene_thread,
+                        args=(f"{self.outfile}.variant_function.{chunk_index}", 
+                              f"{self.outfile}.exonic_variant_function.{chunk_index}",
+                              f"{self.outfile}.invalid_input.{chunk_index}", 
+                              start_line, end_line, chunk_index, gene_db)
+                    )
+                elif self.regionanno:
+                    thread = threading.Thread(
+                        target=self._annotate_query_by_region_thread,
+                        args=(f"{self.outfile}.{self.buildver}_{self.dbtype1}.{chunk_index}",
+                              f"{self.outfile}.invalid_input.{chunk_index}",
+                              start_line, end_line, chunk_index, region_db)
+                    )
+                elif self.filter:
+                    thread = threading.Thread(
+                        target=self._filter_query_thread,
+                        args=(f"{self.outfile}.{self.buildver}_{self.dbtype1}_filtered.{chunk_index}",
+                              f"{self.outfile}.{self.buildver}_{self.dbtype1}_dropped.{chunk_index}",
+                              f"{self.outfile}.invalid_input.{chunk_index}",
+                              start_line, end_line, chunk_index, filter_db)
+                    )
+                
+                threads.append(thread)
+                thread.start()
+            
+            # Wait for all threads in this round to complete
+            for thread in threads:
+                thread.join()
+            
+            logger.info(f"Round {round_num + 1} completed")
+        
+        # Merge results from all rounds
         self._merge_thread_results()
     
     def _run_single_threaded_annotation(self):
@@ -497,7 +531,7 @@ class AnnotateVariation:
                     if self.dbtype1 == 'refGene':
                         if len(parts) < 15:
                             continue
-                        # refGene格式: bin, name, chrom, strand, txStart, txEnd, cdsStart, cdsEnd, exonCount, exonStarts, exonEnds, score, name2, cdsStartStat, cdsEndStat
+                        # refGene format: bin, name, chrom, strand, txStart, txEnd, cdsStart, cdsEnd, exonCount, exonStarts, exonEnds, score, name2, cdsStartStat, cdsEndStat
                         gene_info = {
                             'name': parts[1],
                             'chrom': parts[2],
@@ -539,7 +573,7 @@ class AnnotateVariation:
                     elif self.dbtype1 == 'ensGene':
                         if len(parts) < 16:
                             continue
-                        # ensGene格式: bin, name, chrom, strand, txStart, txEnd, cdsStart, cdsEnd, exonCount, exonStarts, exonEnds, score, name2, cdsStartStat, cdsEndStat, exonFrames
+                        # ensGene format: bin, name, chrom, strand, txStart, txEnd, cdsStart, cdsEnd, exonCount, exonStarts, exonEnds, score, name2, cdsStartStat, cdsEndStat, exonFrames
                         gene_info = {
                             'name': parts[1],
                             'chrom': parts[2],
@@ -805,7 +839,7 @@ class AnnotateVariation:
                 else:
                     function = 'intronic'
                     exonic_function = 'intronic'
-                    # 为内含子生成 c.HGVS（c.N±offset，仅作定位表达，不计算蛋白）
+                    # Generate c.HGVS for introns (c.N±offset, for positioning only, no protein calculation)
                     aa_change = 'NA'
         
         return {
@@ -1511,7 +1545,7 @@ class AnnotateVariation:
             
             # Validate HGVS format
             if not self._validate_hgvs_format(ref_seq, alt_seq):
-                logger.warning(f"HGVS格式校验失败: ref={ref_seq}, alt={alt_seq}")
+                logger.warning(f"HGVS format validation failed: ref={ref_seq}, alt={alt_seq}")
                 return f"{gene_name}:p.?"
             
             # Generate HGVS format based on variant type
@@ -1822,7 +1856,7 @@ class AnnotateVariation:
             annotation_with_transcript = annotation.get('gene_detail') or 'NA'
             # Concatenate standard five column variant information
             var_cols = f"{variant['chrom']}\t{variant['start']}\t{variant['end']}\t{variant['ref']}\t{variant['alt']}"
-            # Perl format: lineN \t ExonicFunc \t AAChange-like(含转录本) \t Chr Start End Ref Alt
+            # Perl format: lineN \t ExonicFunc \t AAChange-like(including transcript) \t Chr Start End Ref Alt
             exonic_line = f"line{self._gene_exonic_line_counter}\t{annotation['exonic_function']}\t{annotation_with_transcript}\t{var_cols}\n"
             exonic_f.write(exonic_line)
     
@@ -1941,7 +1975,7 @@ class AnnotateVariation:
                     
                     # Write the result
                     if is_filtered:
-                        # Get the annotation information for matched variants数据库
+                        # Get the annotation information for matched variants database
                         annotation_info = self._get_filter_annotation_info(variant, filter_db)
                         
                         if self.otherinfo:
@@ -1972,14 +2006,14 @@ class AnnotateVariation:
         filter_file_gz = filter_file_txt + ".gz"
         tabix_tbi = filter_file_gz + ".tbi"
         
-        # 检查文件大小，决定加载策略
+        # Check file size to determine loading strategy
         file_size_mb = 0
         if os.path.exists(filter_file_txt):
             file_size_mb = os.path.getsize(filter_file_txt) / (1024 * 1024)
         elif os.path.exists(filter_file_gz):
             file_size_mb = os.path.getsize(filter_file_gz) / (1024 * 1024)
         
-        # 对于大于100MB的文件，优先使用Tabix索引
+        # For files larger than 100MB, prioritize using Tabix index
         if file_size_mb > 100 and pysam and os.path.exists(filter_file_gz) and os.path.exists(tabix_tbi):
             try:
                 logger.info(f"Using Tabix-indexed database for fast access: {filter_file_gz} ({file_size_mb:.1f}MB)")
@@ -2285,56 +2319,115 @@ class AnnotateVariation:
             logger.error(f"Thread {thread_id} failed: {e}")
     
     def _merge_thread_results(self):
-        """Merge thread results"""
+        """Merge thread results from all rounds"""
         logger.info("Merge thread results...")
         
         try:
             if self.geneanno:
                 # Merge the variant_function file
                 with open(f"{self.outfile}.variant_function", 'w', encoding='utf-8') as merged_f:
-                    for i in range(self.thread):
-                        thread_file = f"{self.outfile}.variant_function.{i}"
+                    chunk_index = 0
+                    while True:
+                        thread_file = f"{self.outfile}.variant_function.{chunk_index}"
                         if os.path.exists(thread_file):
                             with open(thread_file, 'r', encoding='utf-8') as f:
                                 merged_f.write(f.read())
                             os.remove(thread_file)
+                            chunk_index += 1
+                        else:
+                            break
                 
                 # Merge the exonic_variant_function file
                 with open(f"{self.outfile}.exonic_variant_function", 'w', encoding='utf-8') as merged_f:
-                    for i in range(self.thread):
-                        thread_file = f"{self.outfile}.exonic_variant_function.{i}"
+                    chunk_index = 0
+                    while True:
+                        thread_file = f"{self.outfile}.exonic_variant_function.{chunk_index}"
                         if os.path.exists(thread_file):
                             with open(thread_file, 'r', encoding='utf-8') as f:
                                 merged_f.write(f.read())
                             os.remove(thread_file)
+                            chunk_index += 1
+                        else:
+                            break
+                
+                # Merge the invalid_input file
+                with open(f"{self.outfile}.invalid_input", 'w', encoding='utf-8') as merged_f:
+                    chunk_index = 0
+                    while True:
+                        thread_file = f"{self.outfile}.invalid_input.{chunk_index}"
+                        if os.path.exists(thread_file):
+                            with open(thread_file, 'r', encoding='utf-8') as f:
+                                merged_f.write(f.read())
+                            os.remove(thread_file)
+                            chunk_index += 1
+                        else:
+                            break
             
             elif self.regionanno:
                 # Merge the region annotation file
                 with open(f"{self.outfile}.{self.buildver}_{self.dbtype1}", 'w', encoding='utf-8') as merged_f:
-                    for i in range(self.thread):
-                        thread_file = f"{self.outfile}.{self.buildver}_{self.dbtype1}.{i}"
+                    chunk_index = 0
+                    while True:
+                        thread_file = f"{self.outfile}.{self.buildver}_{self.dbtype1}.{chunk_index}"
                         if os.path.exists(thread_file):
                             with open(thread_file, 'r', encoding='utf-8') as f:
                                 merged_f.write(f.read())
                             os.remove(thread_file)
+                            chunk_index += 1
+                        else:
+                            break
+                
+                # Merge the invalid_input file
+                with open(f"{self.outfile}.invalid_input", 'w', encoding='utf-8') as merged_f:
+                    chunk_index = 0
+                    while True:
+                        thread_file = f"{self.outfile}.invalid_input.{chunk_index}"
+                        if os.path.exists(thread_file):
+                            with open(thread_file, 'r', encoding='utf-8') as f:
+                                merged_f.write(f.read())
+                            os.remove(thread_file)
+                            chunk_index += 1
+                        else:
+                            break
             
             elif self.filter:
                 # Merge the filter file
                 with open(f"{self.outfile}.{self.buildver}_{self.dbtype1}_filtered", 'w', encoding='utf-8') as merged_f:
-                    for i in range(self.thread):
-                        thread_file = f"{self.outfile}.{self.buildver}_{self.dbtype1}_filtered.{i}"
+                    chunk_index = 0
+                    while True:
+                        thread_file = f"{self.outfile}.{self.buildver}_{self.dbtype1}_filtered.{chunk_index}"
                         if os.path.exists(thread_file):
                             with open(thread_file, 'r', encoding='utf-8') as f:
                                 merged_f.write(f.read())
                             os.remove(thread_file)
+                            chunk_index += 1
+                        else:
+                            break
                 
                 with open(f"{self.outfile}.{self.buildver}_{self.dbtype1}_dropped", 'w', encoding='utf-8') as merged_f:
-                    for i in range(self.thread):
-                        thread_file = f"{self.outfile}.{self.buildver}_{self.dbtype1}_dropped.{i}"
+                    chunk_index = 0
+                    while True:
+                        thread_file = f"{self.outfile}.{self.buildver}_{self.dbtype1}_dropped.{chunk_index}"
                         if os.path.exists(thread_file):
                             with open(thread_file, 'r', encoding='utf-8') as f:
                                 merged_f.write(f.read())
                             os.remove(thread_file)
+                            chunk_index += 1
+                        else:
+                            break
+                
+                # Merge the invalid_input file
+                with open(f"{self.outfile}.invalid_input", 'w', encoding='utf-8') as merged_f:
+                    chunk_index = 0
+                    while True:
+                        thread_file = f"{self.outfile}.invalid_input.{chunk_index}"
+                        if os.path.exists(thread_file):
+                            with open(thread_file, 'r', encoding='utf-8') as f:
+                                merged_f.write(f.read())
+                            os.remove(thread_file)
+                            chunk_index += 1
+                        else:
+                            break
         
         except Exception as e:
             logger.error(f"Failed to merge thread results: {e}")
@@ -2441,7 +2534,7 @@ class AnnotateVariation:
                     
                     parts = line.split('\t')
                     if len(parts) >= 3:
-                        # 三列格式：gene_id, refseq_id, ensembl_id
+                        # Three-column format: gene_id, refseq_id, ensembl_id
                         gene_id = parts[0]
                         refseq_id = parts[1]
                         ensembl_id = parts[2]
@@ -2458,7 +2551,7 @@ class AnnotateVariation:
                                 'base_ensembl': base_ensembl
                             }
                     elif len(parts) >= 9:
-                        # GTF格式：chr, source, feature, start, end, score, strand, frame, attributes
+                        # GTF format: chr, source, feature, start, end, score, strand, frame, attributes
                         attributes = parts[8]
                         
                         # Parse the attribute field
@@ -2711,14 +2804,14 @@ class AnnotateVariation:
 def main():
     """Main function"""
     examples = (
-        "示例:\n"
-        "1) 基因注释（RefSeq）：\n"
+        "Examples:\n"
+        "1) Gene annotation (RefSeq):\n"
         "   python utils/matchvar/annotate_variation.py -geneanno -buildver hg19 \\\n+        -dbtype refGene -outfile out input.mvinput resources/humandb\n\n"
-        "2) 区域注释（cytoBand）：\n"
+        "2) Region annotation (cytoBand):\n"
         "   python utils/matchvar/annotate_variation.py -regionanno -buildver hg19 \\\n+        -dbtype cytoBand -outfile out input.mvinput resources/humandb\n\n"
-        "3) 过滤（ClinVar）：\n"
+        "3) Filtering (ClinVar):\n"
         "   python utils/matchvar/annotate_variation.py -filter -buildver hg19 \\\n+        -dbtype clinvar -outfile out input.mvinput resources/humandb -otherinfo\n\n"
-        "4) 使用MANE转录本辅助（基因注释）：\n"
+        "4) Using MANE transcript assistance (gene annotation):\n"
         "   python utils/matchvar/annotate_variation.py -geneanno -buildver hg19 \\\n+        -dbtype refGene -outfile out input.mvinput resources/humandb -mane_file resources/humandb/mane_transcript.txt\n"
     )
     parser = argparse.ArgumentParser(
@@ -2735,7 +2828,7 @@ def main():
     parser.add_argument('-filter', action='store_true', help='Filter')
     parser.add_argument('-buildver', default='hg19', help='Genome version')
     parser.add_argument('-thread', type=int, help='Thread number')
-    parser.add_argument('-maxgenethread', type=int, default=4, help='Maximum gene thread number')
+    # parser.add_argument('-maxgenethread', type=int, default=4, help='Maximum gene thread number')
     parser.add_argument('-mingenelinecount', type=int, default=1000000, help='Minimum gene line count')
     parser.add_argument('-exonsort', action='store_true', help='Exon sorting')
     parser.add_argument('-nofirstcodondel', action='store_true', help='Do not delete the first codon')
@@ -2795,6 +2888,11 @@ def main():
     parser.add_argument('--intronic_dup_remote', action='store_true', help='Use Ensembl REST to recognize intronic dup')
     parser.add_argument('--intronic_dup_window', type=int, default=50, help='Intronic dup recognition left window size')
     
+    # When no arguments are provided, show help with examples
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(0)
+        
     args = parser.parse_args()
     
     # Check which parameters are explicitly set
@@ -2816,7 +2914,7 @@ def main():
         filter=args.filter,
         buildver=args.buildver,
         thread=args.thread,
-        maxgenethread=args.maxgenethread,
+        # maxgenethread=args.maxgenethread,
         mingenelinecount=args.mingenelinecount,
         splicing_threshold=args.splicing_threshold,
         indel_splicing_threshold=args.indel_splicing_threshold,
@@ -2875,11 +2973,6 @@ def main():
         _wget_explicitly_set=wget_explicitly_set,
         _precedence_explicitly_set=precedence_explicitly_set
     )
-    
-    # When no arguments are provided, show help with examples
-    if len(sys.argv) == 1:
-        parser.print_help()
-        sys.exit(0)
     
     # Run the annotation
     try:
