@@ -5,7 +5,9 @@
 [![PyPI](https://img.shields.io/pypi/v/matchvar-annotator.svg)](https://pypi.org/project/matchvar-annotator/)
 [![Web Tool](https://img.shields.io/badge/Web%20Tool-Online-brightgreen.svg)](https://matchvar.intelligene.cn/)
 
-MATCHVAR Annotator is a comprehensive Python package for functional annotation and analysis of genomic variants. It provides complete MATCHVAR annotation functionality, including variant annotation, format conversion, coding change analysis, and more.
+**Version 1.2.0** - Now with integrated variant simulation and automated performance evaluation pipeline!
+
+MATCHVAR Annotator is a comprehensive Python package for functional annotation and analysis of genomic variants. It provides complete MATCHVAR annotation functionality, including variant annotation, format conversion, coding change analysis, and an **all-new integrated pipeline** for variant simulation → annotation → evaluation → visualization.
 
 ## 🌐 Web Interface
 
@@ -41,13 +43,19 @@ MATCHVAR Annotator is a comprehensive Python package for functional annotation a
 
 ## Features
 
+### Core Annotation Tools
 - **Variant Annotation**: Supports multiple annotation protocols, including gene annotation, region annotation, and filtering operations
 - **Format Conversion**: Supports conversion between VCF, BED, MATCHVAR, and other formats
 - **Coding Change Analysis**: Analyzes the impact of DNA-level variations on protein sequences
 - **Table Annotation**: Provides complete table annotation functionality
 - **Database Management**: Supports compression, indexing, and validation of large databases
-- **High Performance**: Supports multi-threaded processing to improve annotation efficiency
-- **Flexible Configuration**: Supports custom protocols, operations, and parameter configuration
+
+### 🆕 Integrated Pipeline (New in v1.2.0)
+- **Variant Simulation**: Generate synthetic variants from GTF annotations with biologically-grounded impact scores
+- **Automated Workflow**: One-command execution from GTF → VCF → annotation → evaluation → visualization
+- **Performance Benchmarking**: Automatically calculate auROC scores comparing annotation tools
+- **Publication Figures**: Generate ROC curves, auROC comparison plots (PNG + PDF, 300 DPI)
+- **End-to-End Automation**: No manual file transfers; automatic path propagation and logging
 
 ## Installation
 
@@ -57,7 +65,13 @@ MATCHVAR Annotator is a comprehensive Python package for functional annotation a
 pip install matchvar-annotator
 ```
 
-### Install from Source
+For full functionality including visualization support:
+
+```bash
+pip install "matchvar-annotator[visualization]"
+```
+
+### Install from Source (Development)
 
 ```bash
 git clone https://github.com/zhoubingbo/matchvar-annotator.git
@@ -69,11 +83,67 @@ pip install -e .
 
 ```bash
 python -c "import matchvar_annotator; print('Installation successful!')"
+matchvar-pipeline --help  # Should display usage information
 ```
 
 ## Quick Start
 
+### 🆕 One-Command Pipeline (Recommended)
+
+The new `matchvar-pipeline` command runs the complete workflow:
+
+```bash
+# Basic usage
+matchvar-pipeline \
+  --gtf /path/to/annotation.gtf \
+  --fasta /path/to/genome.fa \
+  --gene BRCA1 \
+  --transcript NM_007294.4 \
+  --database /path/to/humandb \
+  --output ./results
+
+# With custom protocols and multi-threading
+matchvar-pipeline \
+  --gtf gencode.v44.annotation.gtf \
+  --fasta GRCh38.primary_assembly.genome.fa \
+  --gene TP53 \
+  --transcript NM_000546.6 \
+  --database humandb_hg38 \
+  --output ./tp53_benchmark \
+  --protocols refGene,exac03,avsift,dbnsfp42a \
+  --operations g,f,f,f \
+  --buildver hg38 \
+  --threads 16
+```
+
+**What it does automatically:**
+1. Parses GTF to extract gene structure
+2. Generates all variant types (SNV, insertion, deletion, splice sites) with biological scores
+3. Exports VCF with HGVS notation and Total_Score
+4. Runs annotation via `table_matchvar` using specified protocols
+5. Extracts ground truth labels from functional annotations
+6. Calculates auROC for each prediction tool
+7. Saves publication-ready figures (ROC curves, bar plots, heatmaps) and statistics table
+
+**Output structure:**
+```
+results/
+├── BRCA1_simulated.vcf
+├── BRCA1_annotated.hg19_multianno.tsv
+├── BRCA1_auroc_statistics.tsv
+├── BRCA1_pipeline_summary.json
+└── figures/
+    ├── BRCA1_performance_roc.png
+    ├── BRCA1_performance_roc.pdf
+    ├── BRCA1_performance_auroc_bar.png
+    └── BRCA1_performance_heatmap.png
+```
+
+## Traditional Usage (v1.x)
+
 ### Python API Usage
+
+#### Traditional Annotation (v1.x)
 
 ```python
 from matchvar_annotator import MatchvarRunner
@@ -118,9 +188,145 @@ results = db_manager.build_indexes(
 verify_results = db_manager.verify_indexes()
 ```
 
+#### 🆕 Integrated Pipeline API (v1.2.0)
+
+```python
+from matchvar_annotator import MatchingPipeline, run_pipeline
+
+# Method 1: Use MatchingPipeline class
+pipeline = MatchingPipeline(
+    gtf_file="annotation.gtf",
+    fasta_file="genome.fa",
+    gene_name="BRCA1",
+    transcript_id="NM_007294.4",
+    database_dir="humandb",
+    output_dir="./results",
+    protocols=["refGene", "exac03", "avsift"],
+    operations=["g", "f", "f"],
+    variant_types=["SNV", "insertion", "deletion", "splice_site"],
+    buildver="hg19",
+    threads=8
+)
+
+results = pipeline.run()
+print(f"Generated {results['total_variants']} variants")
+print(f"Simulated VCF: {results['simulated_vcf']}")
+print(f"Annotated TSV: {results['annotated_tsv']}")
+print(f"AUROC scores: {results['auroc_scores']}")
+
+# Method 2: Use convenience function
+results = run_pipeline(
+    gtf_file="annotation.gtf",
+    fasta_file="genome.fa",
+    gene_name="TP53",
+    transcript_id="NM_000546.6",
+    database_dir="humandb",
+    output_dir="./tp53_results",
+    buildver="hg38",
+    threads=16
+)
+```
+
+#### Step-by-Step Control
+
+```python
+from matchvar_annotator import GeneTranscript, TableAnnotator, VariantMetricCalculator
+
+# Step 1: Simulate variants
+transcript = GeneTranscript.from_gtf(
+    gene_name="CFTR",
+    transcript_id="NM_000492.4",
+    gtf_file="gencode.v44.annotation.gtf",
+    fasta_file="GRCh38.fa"
+)
+
+variants = transcript.generate_all_variants()
+print(f"Generated {sum(len(v) for v in variants.values())} variants")
+
+transcript.export_to_vcf(variants, "cftr_variants.vcf")
+
+# Step 2: Annotate
+annotator = TableAnnotator(
+    queryfile="cftr_variants.vcf",
+    dbloc="humandb",
+    outfile="cftr_annotated",
+    buildver="hg38",
+    protocol="refGene,dbnsfp42a",
+    operation="g,f",
+    vcfinput=True,
+    otherinfo=True
+)
+annotator.run_annotation()
+
+# Step 3: Evaluate
+calculator = VariantMetricCalculator()
+df = pd.read_csv("cftr_annotated.hg38_multianno.tsv", sep="\t")
+
+y_true = calculator.extract_labels_from_annotation(df)
+print(f"Found {y_true.sum()} pathogenic variants")
+
+# Evaluate each tool's scores
+score_columns = [col for col in df.columns if "score" in col.lower() or "Score" in col]
+for col in score_columns:
+    if col != "Total_Score":
+        y_scores = pd.to_numeric(df[col], errors="coerce").values
+        metrics = calculator.evaluate_tool(y_scores, col, y_true)
+        print(f"{col}: AUROC={metrics['auroc']:.4f}")
+```
+
 ### Command Line Usage
 
-#### Basic Annotation
+#### 🆕 Integrated Pipeline (New)
+
+```bash
+# Run complete pipeline with one command
+matchvar-pipeline \
+  --gtf annotation.gtf \
+  --fasta genome.fa \
+  --gene BRCA1 \
+  --transcript NM_007294.4 \
+  --database /path/to/humandb \
+  --output results
+
+# Customize variant types and protocols
+matchvar-pipeline \
+  --gtf annotation.gtf \
+  --fasta genome.fa \
+  --gene TP53 \
+  --transcript NM_000546.6 \
+  --database humandb \
+  --output tp53_results \
+  --variant-types SNV,insertion,deletion,splice_site \
+  --protocols refGene,exac03,avsift,dbnsfp42a \
+  --operations g,f,f,f \
+  --buildver hg38 \
+  --threads 8 \
+  --verbose
+
+# List available options
+matchvar-pipeline --help
+matchvar-pipeline --list-protocols
+matchvar-pipeline --list-variant-types
+```
+
+**Key options:**
+- `--gtf`: GTF annotation file (required)
+- `--fasta`: Reference genome FASTA (required)
+- `--gene`: Gene symbol (e.g., BRCA1) (required)
+- `--transcript`: Transcript ID (e.g., NM_007294.4) (required)
+- `--database`: Path to humandb directory (required)
+- `--output`: Output directory (required)
+- `--protocols`: Comma-separated annotation tools (default: refGene)
+- `--operations`: Comma-separated operations: g=gene, f=filter (default: g)
+- `--variant-types`: Types of variants to simulate (default: SNV,insertion,deletion)
+- `--buildver`: Genome version, hg19 or hg38 (default: hg19)
+- `--threads`: Number of threads (default: 4)
+- `--no-visualization`: Skip generating figures (faster)
+- `--keep-temp`: Keep intermediate files for debugging
+
+#### Traditional Commands (v1.x)
+
+##### Basic Annotation
 
 ```bash
 # Use default protocols for annotation
@@ -729,11 +935,141 @@ Contributions are welcome! Please follow these steps:
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
+## Project Structure
+
+```
+matchvar-annotator/
+├── matchvar_annotator/          # Main package
+│   ├── __init__.py              # Package init (v1.2.0 API exports)
+│   ├── cli.py                   # Original CLI: matchvar-annotator
+│   ├── table_matchvar.py        # Table annotation (unchanged)
+│   ├── matchvar_annotator.py    # Core annotator (unchanged)
+│   ├── vsimulator.py            # 🆕 Variant simulation wrapper
+│   ├── pipeline.py              # 🆕 End-to-end pipeline
+│   ├── metrics.py               # 🆕 auROC calculation
+│   ├── visualization.py         # 🆕 Figure generation
+│   ├── simulate_annotate_pipeline.py  # 🆕 CLI: matchvar-pipeline
+│   ├── convert2matchvar.py      # Format conversion (unchanged)
+│   ├── coding_change.py         # Coding analysis (unchanged)
+│   ├── database_manager.py      # Database utilities (unchanged)
+│   └── build_tabix_indexes.py   # Index building (unchanged)
+├── setup.py                     # Package setup (updated v1.2.0)
+├── requirements.txt             # Dependencies (updated)
+├── README.md                    # This file (updated)
+├── examples.py                  # 🆕 Usage examples
+├── test_integration.py          # 🆕 Integration test
+└── LICENSE
+```
+
+## Examples
+
+See `examples.py` for complete usage patterns:
+
+```bash
+# Run all examples
+python examples.py all
+
+# Run specific example
+python examples.py 1   # Basic pipeline
+python examples.py 2   # Custom protocols
+python examples.py 3   # Step-by-step execution
+python examples.py 4   # Batch processing
+python examples.py 5   # Evaluation-only mode
+```
+
+## Testing
+
+```bash
+# Run integration tests (no data files required)
+python test_integration.py
+
+# Expected output:
+# ✅ All modules imported successfully
+# ✅ metrics module OK
+# ✅ visualization module OK
+# ✅ pipeline module OK
+# ✅ All tests passed!
+```
+
+## Troubleshooting
+
+### "GTF file not found" or "FASTA file not found"
+- Verify file paths are correct and accessible
+- Gzipped GTF files (`.gz`) are supported
+- Check file permissions
+
+### "Database directory missing"
+- Ensure `humandb` directory contains annotation files (e.g., `hg19_refGene.txt`)
+- Database files should be uncompressed or have `.gz` + `.tbi` indexes
+
+### "No ground truth labels extracted"
+- Check that annotation produced `Func.refGene` or `ExonicFunc.refGene` columns
+- Variants may be all intergenic; try different gene/transcript
+- Ensure simulation generated exonic variants
+
+### Import errors after installation
+```bash
+# Reinstall in development mode
+pip install -e . --force-reinstall
+
+# Check package is importable
+python -c "import matchvar_annotator; print(matchvar_annotator.__version__)"
+```
+
+### Matplotlib backend errors (headless systems)
+```bash
+# Use non-interactive backend
+export MPLBACKEND=Agg
+# Or set in Python before plotting:
+import matplotlib
+matplotlib.use('Agg')
+```
+
+### Memory issues with large genes
+- Use `--threads` to control parallelism
+- Consider limiting variant types: `--variant-types SNV`
+- Pipeline automatically uses temporary files; ensure disk space
+
+## FAQ
+
+**Q: Do I need to modify `data_simulation.py`?**  
+A: No. The original file remains untouched. The new `vsimulator` module is a clean wrapper.
+
+**Q: Can I use just the simulation part?**  
+A: Yes. Import `GeneTranscript` or `simulate_variants` directly.
+
+**Q: Are old commands still available?**  
+A: Yes. `matchvar-annotator`, `matchvar-table`, etc. work exactly as before.
+
+**Q: Does the pipeline require all protocols?**  
+A: No. Specify any subset via `--protocols`. Minimal: just `refGene` for gene annotation.
+
+**Q: Can I add my own evaluation metrics?**  
+A: Yes. `VariantMetricCalculator` accepts any score array. Extend for precision, F1, etc.
+
+**Q: Where are figures saved?**  
+A: In `<output_dir>/figures/` with both `.png` (300 DPI) and `.pdf` formats.
+
+## Contributing
+
+Contributions are welcome! Please follow these steps:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
 ## Acknowledgments
 
 - Thanks to all contributors for their support
 - Based on the MATCHVAR tool development
 - Uses many excellent open source libraries
+- Variant scoring algorithm from the original `data_simulation.py`
 
 ## Contact
 
@@ -741,17 +1077,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Email: zhoubingbo@hotmail.com
 - Project Link: [https://github.com/zhoubingbo/matchvar-annotator](https://github.com/zhoubingbo/matchvar-annotator)
 - Web Tool: [https://matchvar.intelligene.cn/](https://matchvar.intelligene.cn/)
-
-## Changelog
-
-### v1.1.2 (2025-11-11)
-- Updated annotate_variation.py with improvements
-- Updated table_matchvar.py with enhancements
-- Bug fixes and performance optimizations
-
-### v1.1.1 (2025-09-12)
-- Initial version release
-- Support for basic variant annotation functionality
-- Provide command line interface
-- Support for multiple input and output formats
-- Web interface available at https://matchvar.intelligene.cn/

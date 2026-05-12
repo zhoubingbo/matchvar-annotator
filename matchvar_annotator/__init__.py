@@ -13,7 +13,7 @@ Main Features:
 - Table Annotation
 """
 
-__version__ = "1.1.2"
+__version__ = "1.2.0"
 __author__ = "Bingbo Zhou"
 __email__ = "zhoubingbo@hotmail.com"
 __description__ = "MATCHVAR Annotator - Functional annotation and analysis of genomic variants"
@@ -24,6 +24,12 @@ from .table_matchvar import TableAnnotator
 from .convert2matchvar import Convert2Matchvar
 from .coding_change import CodingChange
 from .database_manager import DatabaseManager
+
+# Import new modules
+from .vsimulator import GeneTranscript, simulate_variants, ExonExtractor
+from .pipeline import MatchingPipeline, run_pipeline, run_pipeline_from_args
+from .metrics import VariantMetricCalculator, calculate_auroc_from_dataframe
+from .visualization import PerformanceVisualizer, create_summary_figure
 
 # Import database indexing functionality
 try:
@@ -51,21 +57,39 @@ except ImportError:
 
 # Define public API
 __all__ = [
+    # Core classes
     'MatchvarRunner',
-    'TableAnnotator', 
+    'TableAnnotator',
     'Convert2Matchvar',
     'CodingChange',
     'DatabaseManager',
+
+    # New modules
+    'GeneTranscript',
+    'simulate_variants',
+    'ExonExtractor',
+    'MatchingPipeline',
+    'run_pipeline',
+    'VariantMetricCalculator',
+    'calculate_auroc_from_dataframe',
+    'PerformanceVisualizer',
+    'create_summary_figure',
+
+    # Indexing functions
     'build_index_for_file',
     'verify_tabix_index',
     'diagnose_index_issues',
     'discover_txt_files',
     'discover_gz_files',
-    'TABIX_AVAILABLE',
+
+    # Version info
     '__version__',
     '__author__',
     '__email__',
-    '__description__'
+    '__description__',
+
+    # Flags
+    'TABIX_AVAILABLE',
 ]
 
 # Package-level configuration

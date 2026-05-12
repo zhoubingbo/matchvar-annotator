@@ -26,7 +26,7 @@ def read_requirements():
 
 setup(
     name="matchvar-annotator",
-    version="1.1.2",
+    version="1.2.0",
     author="Bingbo Zhou",
     author_email="zhoubingbo@hotmail.com",
     description="MATCHVAR Annotator - Functional annotation and analysis of genomic variants",
@@ -68,6 +68,7 @@ setup(
             'matchvar-coding=matchvar_annotator.coding_change:main',
             'matchvar-index=matchvar_annotator.build_tabix_indexes:main',
             'matchvar-db=matchvar_annotator.db_cli:main',
+            'matchvar-pipeline=matchvar_annotator.simulate_annotate_pipeline:main',
         ],
     },
     include_package_data=True,
