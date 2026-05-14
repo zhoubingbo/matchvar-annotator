@@ -17,10 +17,14 @@ import sys
 import re
 import itertools
 import gzip
+import logging
 from typing import List, Optional, Dict
 from Bio import SeqIO
 from Bio.Seq import Seq, reverse_complement
 from pyfaidx import Fasta
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 class ExonExtractor:
     """
@@ -58,17 +62,16 @@ class ExonExtractor:
                 - 'genomic_end': 0-based genomic end coordinate (half-open interval)
         """
         # ------------------------------
-        # Step 1: Parse GTF file, extract exon and CDS information for target transcript
+        # Step 1: Parse GTF file, collect all transcripts for target gene
         # ------------------------------
-        exons = {}  # Store exon information (key: exon_id)
-        cds_regions = {}  # Store CDS information (key: exon_id)
+        gene_transcripts = {}  # transcript_id -> {'exons': {}, 'cds_regions': {}}
 
         # 支持.gz压缩文件
         if self.gtf_file.endswith('.gz'):
             file_handle = gzip.open(self.gtf_file, 'rt', encoding='utf-8')
         else:
             file_handle = open(self.gtf_file, 'r')
-        
+
         with file_handle as f:
             for line in f:
                 line = line.strip()
@@ -85,16 +88,19 @@ class ExonExtractor:
                 # Parse attribute field
                 attr_dict = self._parse_gtf_attributes(attrs)
 
-                # Filter for target gene and transcript
-                if (attr_dict.get('gene_name') != gene_name or
-                        attr_dict.get('transcript_id') != transcript_id):
+                # Filter for target gene
+                if attr_dict.get('gene_name') != gene_name:
                     continue
+
+                trans_id = attr_dict.get('transcript_id')
+                if trans_id not in gene_transcripts:
+                    gene_transcripts[trans_id] = {'exons': {}, 'cds_regions': {}}
 
                 # Process exons
                 if feature == 'exon':
                     exon_number = attr_dict.get('exon_number')
                     # GTF coordinates are 1-based closed intervals, convert to 0-based half-open intervals
-                    exons[exon_number] = {
+                    gene_transcripts[trans_id]['exons'][exon_number] = {
                         'chrom': chrom,
                         'start': int(start),  # 1-based start
                         'end': int(end),  # 1-based end (closed interval)
@@ -109,7 +115,7 @@ class ExonExtractor:
                     matched_exon = None
 
                     # Find the matching exon for this CDS region
-                    for exon_id, exon in exons.items():
+                    for exon_id, exon in gene_transcripts[trans_id]['exons'].items():
                         # Check if CDS is completely within the exon
                         if (exon['start'] <= cds_start and
                                 cds_end <= exon['end'] and
@@ -118,13 +124,35 @@ class ExonExtractor:
                             break
 
                     if matched_exon:
-                        cds_regions[matched_exon] = (cds_start, cds_end)
+                        gene_transcripts[trans_id]['cds_regions'][matched_exon] = (cds_start, cds_end)
 
-        # Check if exons and CDS were found
+        # ------------------------------
+        # Step 2: Select the best matching transcript
+        # ------------------------------
+        # Try exact match first
+        if transcript_id in gene_transcripts and gene_transcripts[transcript_id]['exons']:
+            selected_transcript = transcript_id
+        else:
+            # Fuzzy match: compare base transcript IDs (strip version suffix)
+            transcript_base = transcript_id.split('.')[0]
+            selected_transcript = None
+            for trans_id in gene_transcripts:
+                if trans_id.split('.')[0] == transcript_base:
+                    selected_transcript = trans_id
+                    break
+
+        if selected_transcript is None:
+            raise ValueError(f"No transcript found for gene {gene_name} matching {transcript_id}")
+
+        exons = gene_transcripts[selected_transcript]['exons']
+        cds_regions = gene_transcripts[selected_transcript]['cds_regions']
+
         if not exons:
             raise ValueError(f"No exon information found for transcript {transcript_id}")
         if not cds_regions:
             raise ValueError(f"No CDS information found for transcript {transcript_id}")
+
+        logger.info(f"Using transcript {selected_transcript} for {transcript_id}")
 
         # ------------------------------
         # Step 2: Sort exons by genomic position (considering strand direction)
@@ -168,7 +196,9 @@ class ExonExtractor:
             result_exons.append({
                 'cds_sequence': str(cds_seq),
                 'genomic_start': cds_start,  # Convert to 0-based
-                'genomic_end': cds_end  # 0-based (half-open interval)
+                'genomic_end': cds_end,  # 0-based (half-open interval)
+                'chrom': chrom,
+                'strand': strand
             })
 
         # Check if valid CDS was generated
@@ -422,6 +452,46 @@ class GeneTranscript:
             import traceback
             traceback.print_exc()
             return None
+
+    @classmethod
+    def from_gtf(cls, gene_name: str, transcript_id: str, gtf_file: str, fasta_file: str):
+        """
+        Create GeneTranscript object from GTF and FASTA files
+        
+        Args:
+            gene_name: Gene symbol (e.g., 'BRCA1')
+            transcript_id: Transcript ID (e.g., 'NM_007294.3')
+            gtf_file: Path to GTF annotation file
+            fasta_file: Path to reference genome FASTA file
+        
+        Returns:
+            GeneTranscript object
+        """
+        # Extract exon information using ExonExtractor
+        extractor = ExonExtractor(gtf_file, fasta_file)
+        exons = extractor.extract_exons(gene_name, transcript_id)
+        
+        # Get chromosome and strand from the first exon (all exons should have same values)
+        if exons:
+            chromosome = exons[0].get('chrom', 'chr1')
+            strand = exons[0].get('strand', '+')
+            
+            # Ensure chromosome has chr prefix
+            if not chromosome.startswith('chr'):
+                chromosome = f"chr{chromosome}"
+        else:
+            # Fallback values
+            chromosome = 'chr1'
+            strand = '+'
+        
+        # Create GeneTranscript object
+        return cls(
+            gene_name=gene_name,
+            transcript_id=transcript_id,
+            exons=exons,
+            chromosome=chromosome,
+            strand=strand
+        )
 
     def _validate_exons(self):
         """Validate exon structure and CDS sequences"""

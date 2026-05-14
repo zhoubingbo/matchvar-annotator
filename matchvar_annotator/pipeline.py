@@ -173,14 +173,18 @@ class MatchingPipeline:
         )
 
         # Get variants by loading from VCF or regenerate
-        variants = self.transcript.generate_all_variants(variant_types=self.variant_types)
-        self.variants = variants
-        total = sum(len(v) for v in variants.values()) if isinstance(variants, dict) else 0
+        variants_result = self.transcript.generate_all_variants(variant_types=self.variant_types)
+        self.variants = variants_result
+        # Extract variant lists (excluding the 'total' key)
+        variant_lists = {k: v for k, v in variants_result.items() if k != 'total'}
+        total = sum(len(v) for v in variant_lists.values()) if isinstance(variant_lists, dict) else 0
         logger.info(f"Generated {total} variants")
 
     def _run_annotation(self):
         """Run table annotation"""
+        # The TableAnnotator will create a file with genome version suffix
         self.annotated_tsv = os.path.join(self.output_dir, f"{self.gene_name}_annotated.tsv")
+        actual_output = os.path.join(self.output_dir, f"{self.gene_name}_annotated.{self.buildver}_multianno.tsv")
 
         annotator = TableAnnotator(
             queryfile=self.simulated_vcf,
@@ -197,9 +201,12 @@ class MatchingPipeline:
 
         annotator.run_annotation()
 
-        if not os.path.exists(self.annotated_tsv):
-            raise FileNotFoundError(f"Annotation output not found: {self.annotated_tsv}")
-
+        # Check if the expected output file exists
+        if not os.path.exists(actual_output):
+            raise FileNotFoundError(f"Annotation output not found: {actual_output}")
+        
+        # Update the annotated_tsv to point to the actual output file
+        self.annotated_tsv = actual_output
         logger.info(f"Annotation completed: {self.annotated_tsv}")
 
     def _calculate_auroc_scores(self) -> Dict[str, Dict[str, float]]:
