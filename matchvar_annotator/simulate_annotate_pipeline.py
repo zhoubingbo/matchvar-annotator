@@ -107,6 +107,23 @@ Examples:
     optional.add_argument('--variant-types',
                          default='SNV,insertion,deletion',
                          help='Comma-separated variant types (default: SNV,insertion,deletion)')
+    optional.add_argument('--max-indel-length', type=int, default=15,
+                         help='Maximum indel length in bp (default: 15)')
+    optional.add_argument('--min-indel-length', type=int, default=1,
+                         help='Minimum indel length in bp (default: 1)')
+    optional.add_argument('--no-synonymous', action='store_false', dest='synonymous', default=True,
+                         help='Exclude synonymous SNVs')
+    optional.add_argument('--no-stop-codon', action='store_false', dest='include_stop_codon', default=True,
+                         help='Exclude stop-codon variants')
+    optional.add_argument('--max-splice-offset', type=int, default=20,
+                         help='Maximum intron offset for splice site variants (default: 20)')
+    optional.add_argument('--min-splice-offset', type=int, default=1,
+                         help='Minimum intron offset for splice site variants (default: 1)')
+    optional.add_argument('--no-classic-splice-sites', action='store_false',
+                          dest='include_classic_splice_sites', default=True,
+                          help='Exclude classic splice sites (+/-1, +/-2)')
+    optional.add_argument('--max-variants', type=int, default=None,
+                         help='Maximum total variants to generate (default: no limit)')
     optional.add_argument('--protocols',
                          default='refGene',
                          help='Comma-separated annotation protocols (default: refGene)')
@@ -204,7 +221,15 @@ Examples:
             'protocols': [p.strip() for p in args.protocols.split(',')],
             'operations': [o.strip() for o in args.operations.split(',')],
             'buildver': args.buildver,
-            'threads': args.threads
+            'threads': args.threads,
+            'max_indel_length': args.max_indel_length,
+            'min_indel_length': args.min_indel_length,
+            'synonymous': args.synonymous,
+            'include_stop_codon': args.include_stop_codon,
+            'max_splice_offset': args.max_splice_offset,
+            'min_splice_offset': args.min_splice_offset,
+            'include_classic_splice_sites': args.include_classic_splice_sites,
+            'max_variants': args.max_variants,
         }
 
         logger.info("\nPipeline configuration:")

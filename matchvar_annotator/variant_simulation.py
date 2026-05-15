@@ -1,30 +1,8 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Variant Simulator Module
-
-This module provides variant simulation functionality based on GTF annotations
-and reference genome. It generates synthetic variants with biologically
-meaningful impact scores.
-
-This is a refactored version of the original data_simulation.py, integrated
-into the matchvar-annotator package.
-"""
-
-import argparse
-import os
-import sys
-import re
-import itertools
-import gzip
-import logging
+import os, re, itertools, gzip, argparse
 from typing import List, Optional, Dict
 from Bio import SeqIO
 from Bio.Seq import Seq, reverse_complement
 from pyfaidx import Fasta
-
-# Set up logger
-logger = logging.getLogger(__name__)
 
 class ExonExtractor:
     """
@@ -60,18 +38,21 @@ class ExonExtractor:
                 - 'cds_sequence': CDS sequence of the exon (uppercase)
                 - 'genomic_start': 0-based genomic start coordinate
                 - 'genomic_end': 0-based genomic end coordinate (half-open interval)
+            str: Chromosome name
+            str: Strand direction (+/-)
         """
         # ------------------------------
-        # Step 1: Parse GTF file, collect all transcripts for target gene
+        # Step 1: Parse GTF file, extract exon and CDS information for target transcript
         # ------------------------------
-        gene_transcripts = {}  # transcript_id -> {'exons': {}, 'cds_regions': {}}
+        exons = {}  # Store exon information (key: exon_id)
+        cds_regions = {}  # Store CDS information (key: exon_id)
 
         # 支持.gz压缩文件
         if self.gtf_file.endswith('.gz'):
             file_handle = gzip.open(self.gtf_file, 'rt', encoding='utf-8')
         else:
             file_handle = open(self.gtf_file, 'r')
-
+        
         with file_handle as f:
             for line in f:
                 line = line.strip()
@@ -88,19 +69,16 @@ class ExonExtractor:
                 # Parse attribute field
                 attr_dict = self._parse_gtf_attributes(attrs)
 
-                # Filter for target gene
-                if attr_dict.get('gene_name') != gene_name:
+                # Filter for target gene and transcript
+                if (attr_dict.get('gene_name') != gene_name or
+                        attr_dict.get('transcript_id') != transcript_id):
                     continue
-
-                trans_id = attr_dict.get('transcript_id')
-                if trans_id not in gene_transcripts:
-                    gene_transcripts[trans_id] = {'exons': {}, 'cds_regions': {}}
 
                 # Process exons
                 if feature == 'exon':
                     exon_number = attr_dict.get('exon_number')
                     # GTF coordinates are 1-based closed intervals, convert to 0-based half-open intervals
-                    gene_transcripts[trans_id]['exons'][exon_number] = {
+                    exons[exon_number] = {
                         'chrom': chrom,
                         'start': int(start),  # 1-based start
                         'end': int(end),  # 1-based end (closed interval)
@@ -115,7 +93,7 @@ class ExonExtractor:
                     matched_exon = None
 
                     # Find the matching exon for this CDS region
-                    for exon_id, exon in gene_transcripts[trans_id]['exons'].items():
+                    for exon_id, exon in exons.items():
                         # Check if CDS is completely within the exon
                         if (exon['start'] <= cds_start and
                                 cds_end <= exon['end'] and
@@ -124,35 +102,13 @@ class ExonExtractor:
                             break
 
                     if matched_exon:
-                        gene_transcripts[trans_id]['cds_regions'][matched_exon] = (cds_start, cds_end)
+                        cds_regions[matched_exon] = (cds_start, cds_end)
 
-        # ------------------------------
-        # Step 2: Select the best matching transcript
-        # ------------------------------
-        # Try exact match first
-        if transcript_id in gene_transcripts and gene_transcripts[transcript_id]['exons']:
-            selected_transcript = transcript_id
-        else:
-            # Fuzzy match: compare base transcript IDs (strip version suffix)
-            transcript_base = transcript_id.split('.')[0]
-            selected_transcript = None
-            for trans_id in gene_transcripts:
-                if trans_id.split('.')[0] == transcript_base:
-                    selected_transcript = trans_id
-                    break
-
-        if selected_transcript is None:
-            raise ValueError(f"No transcript found for gene {gene_name} matching {transcript_id}")
-
-        exons = gene_transcripts[selected_transcript]['exons']
-        cds_regions = gene_transcripts[selected_transcript]['cds_regions']
-
+        # Check if exons and CDS were found
         if not exons:
             raise ValueError(f"No exon information found for transcript {transcript_id}")
         if not cds_regions:
             raise ValueError(f"No CDS information found for transcript {transcript_id}")
-
-        logger.info(f"Using transcript {selected_transcript} for {transcript_id}")
 
         # ------------------------------
         # Step 2: Sort exons by genomic position (considering strand direction)
@@ -196,16 +152,15 @@ class ExonExtractor:
             result_exons.append({
                 'cds_sequence': str(cds_seq),
                 'genomic_start': cds_start,  # Convert to 0-based
-                'genomic_end': cds_end,  # 0-based (half-open interval)
-                'chrom': chrom,
-                'strand': strand
+                'genomic_end': cds_end  # 0-based (half-open interval)
             })
 
         # Check if valid CDS was generated
         if not result_exons:
             raise ValueError("No valid CDS sequences extracted, possibly a non-coding transcript")
 
-        return result_exons
+        # 新增：返回染色体和链信息，与PostgreSQL格式对齐
+        return result_exons, chrom, strand
 
     def _parse_gtf_attributes(self, attrs_str: str) -> Dict[str, str]:
         """
@@ -287,211 +242,6 @@ class GeneTranscript:
         """Static method to reverse complement a DNA sequence"""
         complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'N': 'N'}
         return ''.join(complement.get(base, base) for base in sequence[::-1])
-    
-    @classmethod
-    def from_postgresql(cls, gene_name: str, transcript_id: str, database: str = 'refgene'):
-        """
-        Create GeneTranscript object from PostgreSQL database
-        
-        Args:
-            gene_name: Gene symbol (e.g., 'PAH')
-            transcript_id: Transcript ID (e.g., 'NM_000277.1')
-            database: Database source ('refgene', 'ensembl', 'ucsc', 'ncbi')
-        
-        Returns:
-            GeneTranscript object or None if not found
-        """
-        try:
-            from ..postgresql_database import db_manager
-            
-            # Get gene structure from PostgreSQL
-            gene_structure = db_manager.get_gene_structure(gene_name, database)
-            if not gene_structure:
-                return None
-            
-            # Find the specific transcript - 支持版本号差异匹配
-            target_transcript = None
-            for transcript in gene_structure['transcripts']:
-                db_transcript_name = transcript['transcript_name']
-                # 精确匹配
-                if db_transcript_name == transcript_id:
-                    target_transcript = transcript
-                    break
-                # 模糊匹配：去掉版本号进行比较
-                elif (db_transcript_name.split('.')[0] == transcript_id.split('.')[0] and 
-                      len(db_transcript_name.split('.')) != len(transcript_id.split('.'))):
-                    target_transcript = transcript
-                    break
-            
-            if not target_transcript:
-                return None
-            
-            # Convert PostgreSQL data to GeneTranscript format
-            gene_info = gene_structure['gene']
-            exons = []
-            
-            # Sort exons by genomic position for proper ordering
-            # For negative strand, we need to reverse the order
-            sorted_exons = sorted(target_transcript['exons'], 
-                                key=lambda x: x['start_pos'], 
-                                reverse=(gene_structure['gene']['strand'] == '-'))
-            
-            # Get start_codon and stop_codon information for proper CDS positioning
-            start_codon_start = target_transcript.get('start_codon_start', 0)
-            start_codon_end = target_transcript.get('start_codon_end', 0)
-            stop_codon_start = target_transcript.get('stop_codon_start', 0)
-            stop_codon_end = target_transcript.get('stop_codon_end', 0)
-            
-            # Fallback to CDS region if codon information is not available
-            cds_start = target_transcript.get('cds_start', 0)
-            cds_end = target_transcript.get('cds_end', 0)
-            
-            # Determine the actual coding region based on start/stop codons
-            if start_codon_start > 0 and stop_codon_start > 0:
-                # Use start_codon and stop_codon for proper positioning
-                if gene_structure['gene']['strand'] == '+':
-                    # For positive strand: start_codon -> stop_codon
-                    coding_start = start_codon_start
-                    coding_end = stop_codon_end
-                else:
-                    # For negative strand: stop_codon (5' end) -> start_codon (3' end)
-                    # stop_codon has smaller coordinate, start_codon has larger coordinate
-                    coding_start = stop_codon_start
-                    coding_end = start_codon_end
-            elif cds_start > 0 and cds_end > 0:
-                # Fallback to CDS region
-                coding_start = cds_start
-                coding_end = cds_end
-            else:
-                # No coding information available
-                coding_start = 0
-                coding_end = 0
-            
-            for exon_data in sorted_exons:
-                exon_start = exon_data['start_pos']
-                exon_end = exon_data['end_pos']
-                
-                # If we have coding region information, only extract the coding part of the exon
-                if coding_start > 0 and coding_end > 0:
-                    # Calculate the overlap between exon and coding region
-                    coding_exon_start = max(exon_start, coding_start)
-                    coding_exon_end = min(exon_end, coding_end)
-                    
-                    # Only process if there's an overlap
-                    if coding_exon_start <= coding_exon_end:
-                        cds_sequence = GeneTranscript._extract_cds_sequence_from_genome(
-                            coding_exon_start, 
-                            coding_exon_end, 
-                            gene_structure['gene']['chromosome']
-                        )
-                        
-                        # For negative strand genes, we need to reverse complement the sequence
-                        if gene_structure['gene']['strand'] == '-':
-                            cds_sequence = cls._reverse_complement_static(cds_sequence)
-                        
-                        # Only include exons with valid CDS sequence
-                        if cds_sequence and len(cds_sequence) > 0:
-                            exons.append({
-                                'cds_sequence': cds_sequence,
-                                'genomic_start': coding_exon_start,
-                                'genomic_end': coding_exon_end
-                            })
-                else:
-                    # No coding region information, extract the entire exon sequence
-                    cds_sequence = GeneTranscript._extract_cds_sequence_from_genome(
-                        exon_start, 
-                        exon_end, 
-                        gene_structure['gene']['chromosome']
-                    )
-                    
-                    # For negative strand genes, we need to reverse complement the sequence
-                    if gene_structure['gene']['strand'] == '-':
-                        cds_sequence = cls._reverse_complement_static(cds_sequence)
-                    
-                    # Only include exons with valid CDS sequence
-                    if cds_sequence and len(cds_sequence) > 0:
-                        exons.append({
-                            'cds_sequence': cds_sequence,
-                            'genomic_start': exon_start,
-                            'genomic_end': exon_end
-                        })
-            
-            if not exons:
-                print(f"Warning: No exons with CDS data found for {gene_name} in {database} database")
-                return None
-            
-            # Create GeneTranscript object
-            print(f"DEBUG: gene_info keys: {list(gene_info.keys())}")
-            print(f"DEBUG: gene_info chromosome: '{gene_info.get('chromosome')}'")
-            chromosome = gene_info.get('chromosome')
-            if not chromosome:
-                print(f"Warning: No chromosome information found for {gene_name} in database")
-                # 尝试从转录本数据中获取染色体信息
-                if target_transcript and 'chromosome' in target_transcript:
-                    chromosome = target_transcript['chromosome']
-                    print(f"Using chromosome from transcript data: {chromosome}")
-                else:
-                    chromosome = 'chr1'  # 最后的fallback
-                    print(f"Using fallback chromosome: {chromosome}")
-            else:
-                if not chromosome.startswith('chr'):
-                    chromosome = f"chr{chromosome}"
-            
-            print(f"Creating GeneTranscript for {gene_name} with chromosome: {chromosome}")
-            
-            return cls(
-                gene_name=gene_name,
-                transcript_id=transcript_id,
-                exons=exons,
-                chromosome=chromosome,
-                strand=gene_info['strand']
-            )
-            
-        except Exception as e:
-            print(f"Error creating GeneTranscript from PostgreSQL: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-
-    @classmethod
-    def from_gtf(cls, gene_name: str, transcript_id: str, gtf_file: str, fasta_file: str):
-        """
-        Create GeneTranscript object from GTF and FASTA files
-        
-        Args:
-            gene_name: Gene symbol (e.g., 'BRCA1')
-            transcript_id: Transcript ID (e.g., 'NM_007294.3')
-            gtf_file: Path to GTF annotation file
-            fasta_file: Path to reference genome FASTA file
-        
-        Returns:
-            GeneTranscript object
-        """
-        # Extract exon information using ExonExtractor
-        extractor = ExonExtractor(gtf_file, fasta_file)
-        exons = extractor.extract_exons(gene_name, transcript_id)
-        
-        # Get chromosome and strand from the first exon (all exons should have same values)
-        if exons:
-            chromosome = exons[0].get('chrom', 'chr1')
-            strand = exons[0].get('strand', '+')
-            
-            # Ensure chromosome has chr prefix
-            if not chromosome.startswith('chr'):
-                chromosome = f"chr{chromosome}"
-        else:
-            # Fallback values
-            chromosome = 'chr1'
-            strand = '+'
-        
-        # Create GeneTranscript object
-        return cls(
-            gene_name=gene_name,
-            transcript_id=transcript_id,
-            exons=exons,
-            chromosome=chromosome,
-            strand=strand
-        )
 
     def _validate_exons(self):
         """Validate exon structure and CDS sequences"""
@@ -2413,7 +2163,8 @@ class GeneTranscript:
                 if 'trinucleotide_context' in var:
                     attrs += f";context={var['trinucleotide_context']}"
                 if 'is_constrained_gene' in var:
-                    attrs += f";constrained={var['is_constrained_gene']}"
+                    if var['is_constrained_gene']:
+                        attrs += f";constrained={var['is_constrained_gene']}"
                 if 'gnomad_constraint_score' in var:
                     attrs += f";gnomad_constraint={var['gnomad_constraint_score']}"
                 
@@ -2443,7 +2194,8 @@ class GeneTranscript:
                 if 'trinucleotide_context' in var:
                     attrs += f";context={var['trinucleotide_context']}"
                 if 'is_constrained_gene' in var:
-                    attrs += f";constrained={var['is_constrained_gene']}"
+                    if var['is_constrained_gene']:
+                        attrs += f";constrained={var['is_constrained_gene']}"
                 if 'gnomad_constraint_score' in var:
                     attrs += f";gnomad_constraint={var['gnomad_constraint_score']}"
                 
@@ -2847,34 +2599,81 @@ class GeneTranscript:
         except Exception:
             return False
 
-
-def simulate_variants(gtf_file: str, fasta_file: str, gene_name: str,
-                     transcript_id: str, output_vcf: str,
-                     variant_types: Optional[List[str]] = None) -> GeneTranscript:
-    """
-    Main entry point for variant simulation
-
-    Args:
-        gtf_file: Path to GTF annotation file
-        fasta_file: Path to reference genome FASTA
-        gene_name: Gene symbol
-        transcript_id: Transcript ID
-        output_vcf: Output VCF file path
-        variant_types: List of variant types to generate
-
-    Returns:
-        GeneTranscript object
-    """
-    logger.info(f"Starting variant simulation for {gene_name} ({transcript_id})")
-
-    transcript = GeneTranscript.from_gtf(
-        gene_name=gene_name,
-        transcript_id=transcript_id,
-        gtf_file=gtf_file,
-        fasta_file=fasta_file
+def main():
+    """Command - line main entry point: Parse arguments → Pre - process GTF/FASTA → Generate variants → Export files"""
+    parser = argparse.ArgumentParser(
+        description="Gene Variant Generation Tool: Generate SNV/InDel/splice - site variants from GTF + reference genome FASTA, and output in VCF/BED format",
+        formatter_class=argparse.RawTextHelpFormatter
     )
 
-    variants = transcript.generate_all_variants(variant_types=variant_types)
-    transcript.export_to_vcf(variants, output_vcf)
+    # ==================== Core input parameters (required) ====================
+    required = parser.add_argument_group('Required Arguments')
+    required.add_argument('--gtf', required=True, type=str, help='Path to the gene annotation GTF file (supports.gz compression)')
+    required.add_argument('--fasta', required=True, type=str, help='Path to the reference genome FASTA file')
+    required.add_argument('--gene-name', required=True, type=str, help='Target gene name (e.g., BRCA1)')
+    required.add_argument('--transcript-id', required=True, type=str, help='Target transcript ID (e.g., NM_007294.4)')
 
-    return transcript
+    # ==================== Output parameters ====================
+    output = parser.add_argument_group('Output Arguments')
+    output.add_argument('--output-vcf', type=str, default='variants.vcf', help='VCF output path (default: variants.vcf)')
+    output.add_argument('--output-bed', type=str, default='', help='BED output path (default: not generated)')
+    output.add_argument('--output-format', choices=['vcf', 'bed', 'both'], default='vcf', help='Output format (default: vcf)')
+
+    # ==================== Variant generation configuration parameters ====================
+    variant = parser.add_argument_group('Variant Generation Arguments')
+    variant.add_argument('--variant-types', nargs='+', default=['SNV', 'insertion', 'deletion'],
+                         choices=['SNV', 'insertion', 'deletion','splice_site', 'inframe'],
+                         help='Variant types to be generated (default: SNV insertion deletion)')
+    variant.add_argument('--max-indel-length', type=int, default=15, help='Maximum insertion/deletion length (default: 15)')
+    variant.add_argument('--min-indel-length', type=int, default=1, help='Minimum insertion/deletion length (default: 1)')
+    variant.add_argument('--synonymous', action='store_true', default=True, help='Generate synonymous mutations (default: on)')
+    variant.add_argument('--no-synonymous', action='store_false', dest='synonymous', help='Do not generate synonymous mutations')
+    variant.add_argument('--include-stop-codon', action='store_true', default=True, help='Include stop - codon mutations (default: on)')
+    variant.add_argument('--no-stop-codon', action='store_false', dest='include_stop_codon', help='Do not generate stop - codon mutations')
+    variant.add_argument('--max-splice-offset', type=int, default=20, help='Maximum intron offset for splice sites (default: 20)')
+    variant.add_argument('--min-splice-offset', type=int, default=1, help='Minimum intron offset for splice sites (default: 1)')
+    variant.add_argument('--include-classic-splice', action='store_true', default=True, help='Include classic splice sites (±1/±2, default: on)')
+    variant.add_argument('--max-variants', type=int, default=None, help='Maximum number of variants to generate (default: no limit)')
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    # ==================== GeneTranscript ====================
+    print(f"Extracting gene structure from GTF/FASTA: {args.gene_name} | {args.transcript_id}")
+    extractor = ExonExtractor(args.gtf, args.fasta)
+    exons, chromosome, strand = extractor.extract_exons(args.gene_name, args.transcript_id)
+
+    # Instantiate GeneTranscript
+    transcript = GeneTranscript(
+        gene_name=args.gene_name,
+        transcript_id=args.transcript_id,
+        exons=exons,
+        chromosome=chromosome,
+        strand=strand
+    )
+    print(f"Gene structure loaded: Chromosome {chromosome} | Strand {strand} | CDS length {transcript.cds_length}bp")
+
+    # ==================== Generate all variants ====================
+    variants = transcript.generate_all_variants(
+        variant_types=args.variant_types,
+        max_indel_length=args.max_indel_length,
+        min_indel_length=args.min_indel_length,
+        synonymous=args.synonymous,
+        include_stop_codon=args.include_stop_codon,
+        max_splice_offset=args.max_splice_offset,
+        min_splice_offset=args.min_splice_offset,
+        include_classic_splice_sites=args.include_classic_splice,
+        max_variants=args.max_variants
+    )
+
+    # ==================== Export files ====================
+    if args.output_format in ['vcf', 'both']:
+        transcript.export_to_vcf(variants, args.output_vcf)
+    if args.output_format in ['bed', 'both'] or args.output_bed:
+        bed_path = args.output_bed if args.output_bed else 'variants.bed'
+        transcript.export_to_bed(variants, bed_path)
+
+    print("All tasks completed!")
+
+if __name__ == '__main__':
+    main()

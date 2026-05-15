@@ -26,8 +26,8 @@ from .coding_change import CodingChange
 from .database_manager import DatabaseManager
 
 # Import new modules
-from .vsimulator import GeneTranscript, simulate_variants, ExonExtractor
-from .pipeline import MatchingPipeline, run_pipeline, run_pipeline_from_args
+from .variant_simulation import GeneTranscript, ExonExtractor
+from .pipeline import MatchingPipeline, run_pipeline, run_pipeline_from_args, simulate_variants
 from .metrics import VariantMetricCalculator, calculate_auroc_from_dataframe
 from .visualization import PerformanceVisualizer, create_summary_figure
 

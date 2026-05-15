@@ -23,10 +23,78 @@ import json
 import pandas as pd
 import numpy as np
 
-from .vsimulator import simulate_variants, GeneTranscript
+from .variant_simulation import GeneTranscript, ExonExtractor
 from .table_matchvar import TableAnnotator
 
 logger = logging.getLogger(__name__)
+
+
+def simulate_variants(gtf_file: str,
+                      fasta_file: str,
+                      gene_name: str,
+                      transcript_id: str,
+                      output_vcf: str,
+                      variant_types: Optional[List[str]] = None,
+                      max_indel_length: int = 15,
+                      min_indel_length: int = 1,
+                      synonymous: bool = True,
+                      include_stop_codon: bool = True,
+                      max_splice_offset: int = 20,
+                      min_splice_offset: int = 1,
+                      include_classic_splice_sites: bool = True,
+                      max_variants: Optional[int] = None) -> GeneTranscript:
+    """
+    Extract exon data from GTF/FASTA, generate variants, and export to VCF.
+
+    Args:
+        gtf_file: Path to GTF annotation file
+        fasta_file: Path to reference genome FASTA
+        gene_name: Target gene symbol
+        transcript_id: Target transcript ID
+        output_vcf: Path for output VCF file
+        variant_types: Types of variants to simulate (default: ['SNV', 'insertion', 'deletion'])
+        max_indel_length: Maximum indel length (default: 15)
+        min_indel_length: Minimum indel length (default: 1)
+        synonymous: Whether to generate synonymous SNVs (default: True)
+        include_stop_codon: Whether to include stop-codon variants (default: True)
+        max_splice_offset: Maximum intron offset for splice sites (default: 20)
+        min_splice_offset: Minimum intron offset for splice sites (default: 1)
+        include_classic_splice_sites: Include classic splice sites (±1/±2) (default: True)
+        max_variants: Maximum total variants to generate (default: no limit)
+
+    Returns:
+        GeneTranscript instance ready for further operations.
+    """
+    # Step 1: Extract exon/CDS structure from GTF and reference genome
+    extractor = ExonExtractor(gtf_file, fasta_file)
+    exons, chromosome, strand = extractor.extract_exons(gene_name, transcript_id)
+
+    # Step 2: Build GeneTranscript object
+    transcript = GeneTranscript(
+        gene_name=gene_name,
+        transcript_id=transcript_id,
+        exons=exons,
+        chromosome=chromosome,
+        strand=strand,
+    )
+
+    # Step 3: Generate variants
+    variants = transcript.generate_all_variants(
+        variant_types=variant_types,
+        max_indel_length=max_indel_length,
+        min_indel_length=min_indel_length,
+        synonymous=synonymous,
+        include_stop_codon=include_stop_codon,
+        max_splice_offset=max_splice_offset,
+        min_splice_offset=min_splice_offset,
+        include_classic_splice_sites=include_classic_splice_sites,
+        max_variants=max_variants,
+    )
+
+    # Step 4: Export to VCF
+    transcript.export_to_vcf(variants, output_vcf)
+
+    return transcript
 
 
 class MatchingPipeline:
@@ -48,7 +116,15 @@ class MatchingPipeline:
                  operations: Optional[List[str]] = None,
                  variant_types: Optional[List[str]] = None,
                  buildver: str = 'hg19',
-                 threads: int = 4):
+                 threads: int = 4,
+                 max_indel_length: int = 15,
+                 min_indel_length: int = 1,
+                 synonymous: bool = True,
+                 include_stop_codon: bool = True,
+                 max_splice_offset: int = 20,
+                 min_splice_offset: int = 1,
+                 include_classic_splice_sites: bool = True,
+                 max_variants: Optional[int] = None):
         """
         Initialize the matching pipeline
 
@@ -64,6 +140,14 @@ class MatchingPipeline:
             variant_types: Types of variants to simulate (default: ['SNV', 'insertion', 'deletion'])
             buildver: Genome version (hg19/hg38)
             threads: Number of threads for annotation
+            max_indel_length: Maximum indel length (default: 15)
+            min_indel_length: Minimum indel length (default: 1)
+            synonymous: Whether to generate synonymous SNVs (default: True)
+            include_stop_codon: Whether to include stop-codon variants (default: True)
+            max_splice_offset: Maximum intron offset for splice sites (default: 20)
+            min_splice_offset: Minimum intron offset for splice sites (default: 1)
+            include_classic_splice_sites: Include classic splice sites (±1/±2) (default: True)
+            max_variants: Maximum total variants to generate (default: no limit)
         """
         self.gtf_file = self._validate_file(gtf_file, "GTF")
         self.fasta_file = self._validate_file(fasta_file, "FASTA")
@@ -77,6 +161,14 @@ class MatchingPipeline:
         self.variant_types = variant_types or ['SNV', 'insertion', 'deletion']
         self.buildver = buildver
         self.threads = threads
+        self.max_indel_length = max_indel_length
+        self.min_indel_length = min_indel_length
+        self.synonymous = synonymous
+        self.include_stop_codon = include_stop_codon
+        self.max_splice_offset = max_splice_offset
+        self.min_splice_offset = min_splice_offset
+        self.include_classic_splice_sites = include_classic_splice_sites
+        self.max_variants = max_variants
 
         self.transcript: Optional[GeneTranscript] = None
         self.variants: Optional[Dict] = None
@@ -169,7 +261,15 @@ class MatchingPipeline:
             gene_name=self.gene_name,
             transcript_id=self.transcript_id,
             output_vcf=self.simulated_vcf,
-            variant_types=self.variant_types
+            variant_types=self.variant_types,
+            max_indel_length=self.max_indel_length,
+            min_indel_length=self.min_indel_length,
+            synonymous=self.synonymous,
+            include_stop_codon=self.include_stop_codon,
+            max_splice_offset=self.max_splice_offset,
+            min_splice_offset=self.min_splice_offset,
+            include_classic_splice_sites=self.include_classic_splice_sites,
+            max_variants=self.max_variants,
         )
 
         # Get variants by loading from VCF or regenerate
