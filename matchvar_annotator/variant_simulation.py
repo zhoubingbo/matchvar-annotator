@@ -209,7 +209,9 @@ class GeneTranscript:
                  chromosome: str = "chr1",
                  strand: str = "+",
                  utr5: Optional[Dict] = None,  # 5' UTR region
-                 utr3: Optional[Dict] = None):  # 3' UTR region
+                 utr3: Optional[Dict] = None,  # 3' UTR region
+                 genome = None,               # pyfaidx Fasta genome object
+                 fasta_file: Optional[str] = None):  # path to FASTA file for fallback lookup
         """
         Initialize gene transcript with explicit exon coordinates (handles intron spacing)
         :param gene_name: Name of the gene
@@ -224,6 +226,8 @@ class GeneTranscript:
         :param strand: Strand direction ('+' or '-')
         :param utr5: 5' UTR region dict with 'genomic_start' and 'genomic_end'
         :param utr3: 3' UTR region dict with 'genomic_start' and 'genomic_end'
+        :param genome: pyfaidx Fasta object from ExonExtractor (primary source for ref bases)
+        :param fasta_file: Path to reference genome FASTA file (fallback source)
         """
         self.gene_name = gene_name
         self.transcript_id = transcript_id
@@ -232,6 +236,8 @@ class GeneTranscript:
         self.strand = strand if strand in ['+', '-'] else '+'
         self.utr5 = utr5
         self.utr3 = utr3
+        self.genome = genome
+        self.fasta_file = fasta_file
         self.valid_nucleotides = {'A', 'T', 'C', 'G'}
         
         # Validate exons and build CDS-genomic coordinate mapping
@@ -1513,74 +1519,57 @@ class GeneTranscript:
             return None
 
     def _get_reference_base_from_fasta(self, genomic_pos: int) -> str:
-        """Get reference base from FASTA file"""
+        """Get reference base from the FASTA file stored in self.fasta_file (primary) or a local genome resource."""
         try:
             import pysam
-            # Try to open the FASTA file
-            fasta_path = f"resources/{self.chromosome}.fa"
-            if not os.path.exists(fasta_path):
-                # Fallback to Homo_sapiens_assembly37.fasta
-                fasta_path = "resources/Homo_sapiens_assembly37.fasta"
-            
-            if os.path.exists(fasta_path):
+            # Primary: use the FASTA file supplied by the user via --fasta / ExonExtractor
+            fasta_path = self.fasta_file if self.fasta_file else None
+
+            if fasta_path and os.path.exists(fasta_path):
                 with pysam.FastaFile(fasta_path) as fasta:
-                    # Handle different chromosome naming conventions
                     chrom_name = self.chromosome
                     if not chrom_name.startswith('chr'):
                         chrom_name = f"chr{chrom_name}"
-                    
-                    # Try different chromosome name formats
                     for chrom_variant in [chrom_name, self.chromosome, chrom_name.replace('chr', '')]:
                         try:
                             base = fasta.fetch(chrom_variant, genomic_pos - 1, genomic_pos).upper()
                             if base and base in 'ATCGN':
                                 return base
-                        except Exception as e:
-                            print(f"Failed to fetch base for {chrom_variant} at {genomic_pos}: {e}")
+                        except Exception:
                             continue
-                    
-                    # If all variants fail, try to get from available chromosomes
                     try:
                         available_chroms = fasta.references
-                        print(f"Available chromosomes: {available_chroms}")
-                        # Try to find a matching chromosome
                         for available_chrom in available_chroms:
-                            if (self.chromosome in available_chrom or 
+                            if (self.chromosome in available_chrom or
                                 available_chrom in self.chromosome or
                                 available_chrom.replace('chr', '') == self.chromosome.replace('chr', '')):
                                 try:
                                     base = fasta.fetch(available_chrom, genomic_pos - 1, genomic_pos).upper()
                                     if base and base in 'ATCGN':
-                                        print(f"Successfully fetched base {base} from {available_chrom} at {genomic_pos}")
                                         return base
-                                except:
+                                except Exception:
                                     continue
-                    except:
+                    except Exception:
                         pass
-                    
-                    # If all attempts fail, return N instead of A
-                    print(f"Warning: Could not fetch reference base for {self.chromosome} at {genomic_pos}")
-                    return 'N'
-            else:
-                print(f"FASTA file not found: {fasta_path}")
-                return 'N'  # Return N instead of A when file not found
+
+            if fasta_path:
+                print(f"FASTA file not found or chromosome not in FASTA: {fasta_path}")
+            return 'N'
         except Exception as e:
             print(f"Error getting reference base from FASTA: {e}")
-            return 'N'  # Return N instead of A on error
+            return 'N'
 
-    @staticmethod
-    def _extract_cds_sequence_from_genome(start_pos: int, end_pos: int, chromosome: str) -> str:
-        """Extract CDS sequence from genome FASTA file using pyfaidx"""
+    def _extract_cds_sequence_from_genome(self, start_pos: int, end_pos: int, chromosome: str) -> str:
+        """Extract CDS sequence from the FASTA file stored in self.fasta_file."""
         try:
             from pyfaidx import Fasta
-            
-            # Use the unified fasta file
-            fasta_path = "resources/Homo_sapiens_assembly37.fasta"
-            
-            if not os.path.exists(fasta_path):
+
+            fasta_path = self.fasta_file
+
+            if not fasta_path or not os.path.exists(fasta_path):
                 print(f"FASTA file not found: {fasta_path}")
                 return 'N' * (end_pos - start_pos + 1)
-            
+
             with Fasta(fasta_path) as fasta:
                 # Handle different chromosome naming conventions
                 chrom_variants = [
@@ -2644,13 +2633,16 @@ def main():
     extractor = ExonExtractor(args.gtf, args.fasta)
     exons, chromosome, strand = extractor.extract_exons(args.gene_name, args.transcript_id)
 
-    # Instantiate GeneTranscript
+    # Instantiate GeneTranscript (pass genome and fasta_file so
+    # reference-base fallbacks use the user-supplied FASTA)
     transcript = GeneTranscript(
         gene_name=args.gene_name,
         transcript_id=args.transcript_id,
         exons=exons,
         chromosome=chromosome,
-        strand=strand
+        strand=strand,
+        genome=extractor.genome,
+        fasta_file=args.fasta,
     )
     print(f"Gene structure loaded: Chromosome {chromosome} | Strand {strand} | CDS length {transcript.cds_length}bp")
 

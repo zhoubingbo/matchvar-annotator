@@ -69,13 +69,16 @@ def simulate_variants(gtf_file: str,
     extractor = ExonExtractor(gtf_file, fasta_file)
     exons, chromosome, strand = extractor.extract_exons(gene_name, transcript_id)
 
-    # Step 2: Build GeneTranscript object
+    # Step 2: Build GeneTranscript object (pass genome and fasta_file so
+    # reference-base fallbacks use the user-supplied FASTA, not a hardcoded path)
     transcript = GeneTranscript(
         gene_name=gene_name,
         transcript_id=transcript_id,
         exons=exons,
         chromosome=chromosome,
         strand=strand,
+        genome=extractor.genome,
+        fasta_file=fasta_file,
     )
 
     # Step 3: Generate variants
