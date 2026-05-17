@@ -71,39 +71,58 @@ def extract_score_columns(df: pd.DataFrame) -> List[str]:
     ]
 
 
-def extract_true_labels(df: pd.DataFrame) -> Optional[np.ndarray]:
+def extract_true_labels(df:        pd.DataFrame,
+                         vcf_path:  Optional[str]   = None,
+                         ) -> Optional[np.ndarray]:
     """
     Extract binary ground-truth labels from an annotated TSV DataFrame.
 
-    Checks, in order of preference:
+    Checks, in priority order:
       Func.refGene  →  ExonicFunc.refGene  →  TYPE
+      → VCF INFO embedded in VCF Otherinfo columns
+      → VCF INFO from the VCF file itself (if vcf_path is given)
 
     Returns
     -------
     Optional[np.ndarray]
-        Integer array of 0/1 labels, or ``None`` when no suitable column exists.
+        Integer array of 0/1 labels, or ``None`` when no suitable source exists.
     """
+    import re as _re
+    _info_re   = _re.compile(r'(?:^|;)TYPE=([^;]+)')
+    _frame_re  = _re.compile(r'(?:^|;)FRAMESHIFT=([^;]+)')
+
+    def _labels_from_info_str(info_str: str) -> int:
+        """Return 1 if the VCF INFO string represents a pathogenic label."""
+        vt_match  = _info_re.search(info_str)
+        fr_match  = _frame_re.search(info_str)
+        vt  = vt_match.group(1).upper().strip() if vt_match else ''
+        fr  = fr_match.group(1).lower().strip() if fr_match else 'false'
+        return int(vt in ('SPLICING', 'SPLICE_SITE', 'FRAMESHIFT') or fr == 'true')
+
     try:
+        # 1. Func.refGene column (standard refGene gene annotation)
         if 'Func.refGene' in df.columns:
-            func    = df['Func.refGene'].fillna('').astype(str).str.lower()
-            labels  = func.str.contains(_FUNC_RE.pattern,
-                                        regex=True, na=False).astype(np.int8)
-            n_pos   = int(labels.sum())
+            func   = df['Func.refGene'].fillna('').astype(str).str.lower()
+            labels = func.str.contains(_FUNC_RE.pattern,
+                                       regex=True, na=False).astype(np.int8)
+            n_pos  = int(labels.sum())
             logger.info(
                 f"Extracted {n_pos} positive labels from Func.refGene "
                 f"({n_pos}/{len(labels)} = {n_pos / max(len(labels), 1):.1%})")
             return labels.values
 
+        # 2. ExonicFunc.refGene column (standard refGene exonic annotation)
         if 'ExonicFunc.refGene' in df.columns:
-            exonic  = df['ExonicFunc.refGene'].fillna('').astype(str).str.lower()
-            labels  = exonic.str.contains(_EXFUNC_RE.pattern,
-                                          regex=True, na=False).astype(np.int8)
-            n_pos   = int(labels.sum())
+            exonic = df['ExonicFunc.refGene'].fillna('').astype(str).str.lower()
+            labels = exonic.str.contains(_EXFUNC_RE.pattern,
+                                         regex=True, na=False).astype(np.int8)
+            n_pos  = int(labels.sum())
             logger.info(
                 f"Extracted {n_pos} positive labels from ExonicFunc.refGene "
                 f"({n_pos}/{len(labels)} = {n_pos / max(len(labels), 1):.1%})")
             return labels.values
 
+        # 3. TYPE column (direct VCF-label column, already parsed by annotation)
         if 'TYPE' in df.columns:
             var_type = df['TYPE'].fillna('').astype(str).str.upper()
             labels   = var_type.isin(
@@ -115,9 +134,47 @@ def extract_true_labels(df: pd.DataFrame) -> Optional[np.ndarray]:
                 f"({n_pos}/{len(labels)} = {n_pos / max(len(labels), 1):.1%})")
             return labels.values
 
+        # 4. Otherinfo VCF columns: look for INFO content with TYPE/FRAMESHIFT keys
+        for col in df.columns:
+            if not col.startswith('Otherinfo'):
+                continue
+            raw = df[col].fillna('').astype(str)
+            labels_raw = [_labels_from_info_str(v) for v in raw]
+            if sum(labels_raw) == 0:
+                continue   # not an INFO column – try next Otherinfo
+            labels = np.array(labels_raw, dtype=np.int8)
+            n_pos  = int(labels.sum())
+            logger.info(
+                f"Extracted {n_pos} positive labels from {col} "
+                f"(VCF INFO parsed)  "
+                f"({n_pos}/{len(labels)} = {n_pos / max(len(labels), 1):.1%})")
+            return labels.values
+
+        # 5. VCF file directly (most reliable: reads INFO without TSV column ambiguity)
+        if vcf_path and os.path.exists(vcf_path):
+            labels_list = []
+            with open(vcf_path, 'r') as fh:
+                for line in fh:
+                    if line.startswith('#'):
+                        continue
+                    parts = line.strip().split('\t')
+                    if len(parts) < 8:
+                        continue
+                    labels_list.append(_labels_from_info_str(parts[7]))
+            if labels_list:
+                labels = np.array(labels_list, dtype=np.int8)
+                n_pos  = int(labels.sum())
+                logger.info(
+                    f"Extracted {n_pos} positive labels from VCF INFO "
+                    f"(vcf_path)  "
+                    f"({n_pos}/{len(labels)} = "
+                    f"{n_pos / max(len(labels), 1):.1%})")
+                return labels
+
         logger.error(
-            "No suitable label column found. "
-            "Expected one of: Func.refGene, ExonicFunc.refGene, TYPE")
+            "No suitable label source found. "
+            "Tried (in order): Func.refGene, ExonicFunc.refGene, TYPE, "
+            "Otherinfo VCF-INFO columns, VCF INFO from file.")
         return None
 
     except Exception as exc:
@@ -888,40 +945,48 @@ def create_summary_figure(tool_metrics:    Dict[str, Dict],
     figures: Dict[str, str] = {}
 
     # ROC curves
-    roc_path = str(out_dir / f"{prefix}_roc.png")
+    roc_png  = str(out_dir / f"{prefix}_roc.png")
+    roc_pdf  = roc_png.replace('.png', '.pdf')
     visualizer.plot_roc_curves(
         tool_metrics,
         title       = f'ROC Curves — {gene_name}',
-        output_file = roc_path,
+        output_file = roc_png,
     )
-    figures['roc'] = roc_path
+    figures['roc']                  = roc_png
+    figures['roc_pdf']              = roc_pdf
 
     # auROC bar
-    bar_path = str(out_dir / f"{prefix}_auroc_bar.png")
+    bar_png  = str(out_dir / f"{prefix}_auroc_bar.png")
+    bar_pdf  = bar_png.replace('.png', '.pdf')
     visualizer.plot_auroc_comparison(
         tool_metrics,
         title       = f'Annotation Tool Performance — {gene_name}',
-        output_file = bar_path,
+        output_file = bar_png,
     )
-    figures['auroc_bar'] = bar_path
+    figures['auroc_bar']            = bar_png
+    figures['auroc_bar_pdf']        = bar_pdf
 
     # Precision-Recall curves
-    pr_path = str(out_dir / f"{prefix}_pr.png")
+    pr_png   = str(out_dir / f"{prefix}_pr.png")
+    pr_pdf   = pr_png.replace('.png', '.pdf')
     visualizer.plot_precision_recall(
         tool_metrics,
         title       = f'Precision-Recall Curves — {gene_name}',
-        output_file = pr_path,
+        output_file = pr_png,
     )
-    figures['pr'] = pr_path
+    figures['pr']                   = pr_png
+    figures['pr_pdf']               = pr_pdf
 
     # Heatmap
-    hm_path = str(out_dir / f"{prefix}_heatmap.png")
+    hm_png   = str(out_dir / f"{prefix}_heatmap.png")
+    hm_pdf   = hm_png.replace('.png', '.pdf')
     visualizer.plot_performance_heatmap(
         tool_metrics,
         title       = f'Performance Summary — {gene_name}',
-        output_file = hm_path,
+        output_file = hm_png,
     )
-    figures['heatmap'] = hm_path
+    figures['heatmap']              = hm_png
+    figures['heatmap_pdf']          = hm_pdf
 
     logger.info(f"Generated {len(figures)} summary figures → {output_dir}")
     return figures
@@ -951,7 +1016,8 @@ def create_diagnostic_figures(annotated_tsv:   str,
         Directory to save produced figures.
     vcf_path : str, optional
         Path to the companion VCF.  When provided, ``TOTAL_SCORE`` is
-        extracted from the VCF INFO field and injected into the TSV.
+        extracted from the VCF INFO field and injected into the TSV, and
+        ground-truth labels (TYPE, FRAMESHIFT) are read from the VCF.
     score_col : str
         Name of the score column to plot.
 
@@ -972,16 +1038,36 @@ def create_diagnostic_figures(annotated_tsv:   str,
 
     result: Dict[str, Any] = {'figures': {}, 'df': df}
 
-    # Score-vs-truth
+    # ── Ground truth: prefer VCF (most reliable for --operations f runs) ──
+    y_true = extract_true_labels(df, vcf_path=vcf_path)
+
+    if y_true is not None:
+        n_pos  = int(y_true.sum())
+        logger.info(
+            f"Ground truth ({gene_name}): {n_pos}/{len(y_true)} "
+            f"({n_pos / max(len(y_true), 1):.1%}) positive")
+
+        if n_pos == 0:
+            logger.warning("All labels are negative; auROC will be NaN.")
+        elif n_pos == len(y_true):
+            logger.warning("All labels are positive — degenerate ROC case.")
+    else:
+        logger.warning("Ground truth labels unavailable — metric figures will be skipped.")
+
+    # Score-vs-truth  (only if truth is available and a score column exists)
+    logger.info(
+        f"Score column '{score_col}' "
+        f"{'found in TSV' if score_col in df.columns else 'will be injected from VCF if available'}")
     plot_path = visualizer.plot_score_vs_truth(
         annotated_tsv, gene_name, output_dir, score_col=score_col)
     if plot_path:
         result['figures']['score_vs_truth'] = plot_path
 
-    # Variant-type distribution
-    dist_path = visualizer.plot_variant_distribution(
-        annotated_tsv, gene_name, output_dir)
-    if dist_path:
-        result['figures']['variant_type_distribution'] = dist_path
+    # Variant-type distribution  (only if label column is available)
+    if y_true is not None:
+        dist_path = visualizer.plot_variant_distribution(
+            annotated_tsv, gene_name, output_dir)
+        if dist_path:
+            result['figures']['variant_type_distribution'] = dist_path
 
     return result

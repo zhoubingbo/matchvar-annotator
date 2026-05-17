@@ -328,7 +328,7 @@ class MatchingPipeline:
         df = pd.read_csv(self.annotated_tsv, sep='\t', low_memory=False)
 
         # ── ground-truth labels ────────────────────────────────────────────────
-        y_true = self._get_true_labels(df)
+        y_true = self._get_true_labels(df, vcf_path=self.simulated_vcf)
         if y_true is None:
             return {}
         if len(y_true) == 0:
@@ -411,37 +411,90 @@ class MatchingPipeline:
 
         return scores
 
-    def _get_true_labels(self, df: pd.DataFrame) -> Optional[np.ndarray]:
+    def _get_true_labels(self, df: pd.DataFrame,
+                         vcf_path: Optional[str] = None) -> Optional[np.ndarray]:
         """
-        Extract ground truth binary labels from annotated dataframe
-        Labels derived from variant type: pathogenic variants (loss-of-function, splicing) = 1
+        Extract binary ground-truth labels from annotated dataframe.
+
+        Tries, in priority order:
+        1. Func.refGene / ExonicFunc.refGene (from gene annotation operations)
+        2. Otherinfo VCF-INFO columns (--vcfinput --otherinfo path)
+        3. VCF file directly (most reliable for --operations f runs)
+        4. TYPE column (already-parsed VCF label column)
         """
+        import re as _re
+        _TYPE_RE  = _re.compile(r'(?:^|;)TYPE=([^;]+)')
+        _FRM_RE   = _re.compile(r'(?:^|;)FRAMESHIFT=([^;]+)')
+        _PATHO_T  = {'SPLICING', 'SPLICE_SITE', 'FRAMESHIFT'}
+
+        def _lbl_from_info_str(s: str) -> int:
+            vt = _TYPE_RE.search(s)
+            fr = _FRM_RE.search(s)
+            vtt = vt.group(1).upper().strip()  if vt else ''
+            frt = fr.group(1).lower().strip()  if fr else 'false'
+            return int(vtt in _PATHO_T or frt == 'true')
+
         try:
+            # 1. Func.refGene
             if 'Func.refGene' in df.columns:
                 func = df['Func.refGene'].fillna('').str.lower()
-                y_true = func.str.contains('splicing|stopgain|stoploss|frameshift|nonsyn', na=False).astype(int).values
-                logger.info(f"Extracted {y_true.sum()} positive labels from functional annotation")
-                return y_true
+                y = func.str.contains('splicing|stopgain|stoploss|frameshift|nonsyn',
+                                       na=False).astype(int).values
+                logger.info(f"Extracted {y.sum()} positive labels from Func.refGene")
+                return y
 
-            elif 'ExonicFunc.refGene' in df.columns:
-                exonic_func = df['ExonicFunc.refGene'].fillna('').str.lower()
-                y_true = exonic_func.str.contains('splicing|stopgain|stoploss|frameshift|nonsynonymous', na=False).astype(int).values
-                logger.info(f"Extracted {y_true.sum()} positive labels from exonic function")
-                return y_true
+            # 2. ExonicFunc.refGene
+            if 'ExonicFunc.refGene' in df.columns:
+                exo = df['ExonicFunc.refGene'].fillna('').str.lower()
+                y = exo.str.contains('splicing|stopgain|stoploss|frameshift|nonsynonymous',
+                                     na=False).astype(int).values
+                logger.info(f"Extracted {y.sum()} positive labels from ExonicFunc.refGene")
+                return y
 
-            elif 'TYPE' in df.columns:
+            # 3. TYPE column
+            if 'TYPE' in df.columns:
                 var_type = df['TYPE'].fillna('').str.upper()
-                y_true = var_type.isin(['SPLICE_SITE', 'FRAMESHIFT', 'NONSENSE', 'STOPLOSS']).astype(int).values
-                logger.info(f"Extracted {y_true.sum()} positive labels from variant type")
-                return y_true
+                y = var_type.isin(['SPLICE_SITE', 'FRAMESHIFT', 'NONSENSE', 'STOPLOSS']).astype(int).values
+                logger.info(f"Extracted {y.sum()} positive labels from TYPE column")
+                return y
 
-            else:
-                logger.error("No suitable column for ground truth extraction")
-                return None
+            # 4. Otherinfo columns — VCF INFO content (TYPE=…;FRAMESHIFT=…)
+            # The pipeline passes -includeinfo -withfreq; the VCF INFO field is typically
+            # in the last Otherinfo column.  We parse every Otherinfo column and pick
+            # the one that actually contains pathogenic labels.
+            for col in df.columns:
+                if not col.startswith('Otherinfo'):
+                    continue
+                raw    = df[col].fillna('').astype(str)
+                labels = [_lbl_from_info_str(v) for v in raw]
+                if sum(labels) == 0:
+                    continue   # not an INFO column — skip
+                y = np.array(labels, dtype=np.int8)
+                logger.info(
+                    f"Extracted {y.sum()} positive labels from VCF INFO in "
+                    f"column '{col}' ({y.sum()}/{len(y)} "
+                    f"= {y.sum()/max(len(y),1):.1%})")
+                return y
 
-        except Exception as e:
-            logger.error(f"Error extracting true labels: {e}")
+            # 5. VCF file directly
+            if vcf_path and os.path.exists(vcf_path):
+                y = _labels_from_vcf_info(vcf_path)
+                if y is not None and len(y) > 0:
+                    logger.info(
+                        f"Extracted {y.sum()} positive labels from VCF INFO "
+                        f"({y.sum()}/{len(y)} = "
+                        f"{y.sum()/max(len(y),1):.1%})")
+                    return y
+
+            logger.error(
+                "No label source found. Tried: Func.refGene / ExonicFunc.refGene / "
+                "TYPE / Otherinfo (VCF INFO) / VCF file.")
             return None
+
+        except Exception as exc:
+            logger.error(f"Error extracting true labels: {exc}")
+            return None
+
 
     def _generate_visualizations(self, scores: Dict[str, Dict]) -> Dict[str, str]:
         """
@@ -474,7 +527,7 @@ class MatchingPipeline:
         # ── No metrics – produce diagnostic figures instead of returning empty ──
         logger.info("No auROC scores available; producing diagnostic figures")
         tsv_path  = self.annotated_tsv
-        vcf_path  = self.simulated_vcf  # known path set during simulation
+        vcf_path  = self.simulated_vcf  # set during _run_simulation
 
         diag = create_diagnostic_figures(
             annotated_tsv=tsv_path,
@@ -484,6 +537,95 @@ class MatchingPipeline:
         )
         logger.info(f"Generated {len(diag['figures'])} diagnostic figures")
         return {k: v for k, v in diag.get('figures', {}).items()}
+
+    def _save_summary(self, results: Dict[str, Any]):
+        """Save pipeline summary as JSON"""
+        summary_file = os.path.join(self.output_dir, f"{self.gene_name}_pipeline_summary.json")
+
+        summary = {
+            'gene_name': results['gene_name'],
+            'transcript_id': results['transcript_id'],
+            'timestamp': datetime.now().isoformat(),
+            'total_variants': results['total_variants'],
+            'simulated_vcf': results['simulated_vcf'],
+            'annotated_tsv': results['annotated_tsv'],
+            'auroc_scores': results['auroc_scores'],
+            'figures': {k: v for k, v in results['figures'].items() if k.endswith('_pdf')}
+        }
+
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2)
+
+        logger.info(f"Summary saved: {summary_file}")
+
+        # Also create a TSV statistics table
+        stats_file = os.path.join(self.output_dir, f"{self.gene_name}_auroc_statistics.tsv")
+        if results['auroc_scores']:
+            stats_df = pd.DataFrame([
+                {
+                    'Tool': tool,
+                    'AUROC': metrics['auroc'],
+                    'AUPRC': metrics['auprc'],
+                    'N_Variants': metrics['n_variants']
+                }
+                for tool, metrics in results['auroc_scores'].items()
+            ])
+            stats_df.to_csv(stats_file, sep='\t', index=False)
+            logger.info(f"Statistics table saved: {stats_file}")
+
+
+def _labels_from_vcf_info(vcf_path: str) -> Optional[np.ndarray]:
+    """
+    Parse VCF INFO and return per-position binary labels.
+    Each VCF record contributes one label: 1 if TYPE is SPLICING/SPLICE_SITE/
+    FRAMESHIFT or if FRAMESHIFT=true, 0 otherwise.
+    When a genomic position has multiple records the label is the OR of all labels.
+    """
+    import re as _re
+    _TYPE_RE = _re.compile(r'(?:^|;)TYPE=([^;]+)')
+    _FRM_RE  = _re.compile(r'(?:^|;)FRAMESHIFT=([^;]+)')
+    _PATHO   = {'SPLICING', 'SPLICE_SITE', 'FRAMESHIFT'}
+
+    if not os.path.exists(vcf_path):
+        logger.error(f"VCF file not found: {vcf_path}")
+        return None
+
+    pos_labels: Dict[str, int] = {}
+    pos_order: List[str] = []
+
+    try:
+        with open(vcf_path, 'r') as fh:
+            for line in fh:
+                if line.startswith('#'):
+                    continue
+                parts = line.strip().split('\t')
+                if len(parts) < 8:
+                    continue
+                info  = parts[7]
+                vt_m  = _TYPE_RE.search(info)
+                fr_m  = _FRM_RE.search(info)
+                vt    = vt_m.group(1).upper().strip() if vt_m else ''
+                fr    = fr_m.group(1).lower().strip() if fr_m else 'false'
+                lbl   = int(vt in _PATHO or fr == 'true')
+                if parts[1] not in pos_labels:
+                    pos_labels[parts[1]] = lbl
+                    pos_order.append(parts[1])
+                elif lbl == 1:
+                    pos_labels[parts[1]] = 1
+
+        if not pos_order:
+            logger.warning("No VCF records found while extracting labels")
+            return None
+
+        aligned = [pos_labels[p] for p in pos_order]
+        logger.info(
+            f"VCF direct labels: {sum(aligned)}/{len(aligned)} positive "
+            f"({sum(aligned)/max(len(aligned),1):.1%}) across {len(pos_order)} positions")
+        return np.array(aligned, dtype=np.int8)
+
+    except Exception as exc:
+        logger.error(f"Error reading VCF file for labels: {exc}")
+        return None
 
     def _save_summary(self, results: Dict[str, Any]):
         """Save pipeline summary as JSON"""
