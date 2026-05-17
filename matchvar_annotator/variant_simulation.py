@@ -24,24 +24,24 @@ class ExonExtractor:
         # Load genome data using pyfaidx for better performance
         self.genome = Fasta(fasta_file)
 
-def extract_exons(self, gene_name: str, transcript_id: str) -> Tuple[List[Dict], str, str]:
-    """
-    Extract exon CDS information for a specified gene and transcript,
-    generating a list of exon dictionaries.
-
-    Parameters:
-        gene_name: Target gene name (e.g., "BRCA1")
-        transcript_id: Target transcript ID (e.g., "NM_007294.4")
-
-    Returns:
-        Tuple containing:
-        - List[Dict]: A list in the standard format, where each element contains:
-            - 'cds_sequence': CDS sequence of the exon (uppercase)
-            - 'genomic_start': 0-based genomic start coordinate
-            - 'genomic_end': 0-based genomic end coordinate (half-open interval)
-        - str: Chromosome name
-        - str: Strand direction (+/-)
-    """
+    def extract_exons(self, gene_name: str, transcript_id: str) -> Tuple[List[Dict], str, str]:
+        """
+        Extract exon CDS information for a specified gene and transcript,
+        generating a list of exon dictionaries.
+    
+        Parameters:
+            gene_name: Target gene name (e.g., "BRCA1")
+            transcript_id: Target transcript ID (e.g., "NM_007294.4")
+    
+        Returns:
+            Tuple containing:
+            - List[Dict]: A list in the standard format, where each element contains:
+                - 'cds_sequence': CDS sequence of the exon (uppercase)
+                - 'genomic_start': 0-based genomic start coordinate
+                - 'genomic_end': 0-based genomic end coordinate (half-open interval)
+            - str: Chromosome name
+            - str: Strand direction (+/-)
+        """
         # ------------------------------
         # Step 1: Parse GTF file, extract exon and CDS information for target transcript
         # ------------------------------
