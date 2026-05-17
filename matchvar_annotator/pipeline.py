@@ -312,63 +312,102 @@ class MatchingPipeline:
         self.annotated_tsv = actual_output
         logger.info(f"Annotation completed: {self.annotated_tsv}")
 
-    def _calculate_auroc_scores(self) -> Dict[str, Dict[str, float]]:
+    def _calculate_auroc_scores(self) -> Dict[str, Dict[str, Any]]:
         """
-        Calculate auROC scores for each annotation tool
+        Calculate auROC / auPRC scores for every score column found in the
+        annotated TSV.
 
-        Returns:
-            Dictionary: {tool_name: {'auroc': float, 'auprc': float, ...}}
+        This method is intentionally lenient:
+        - does NOT require Total_Score to be present
+        - does NOT silently drop columns with < 10 valid scores (only warns)
+        - still returns an empty dict when appropriate
         """
         if not self.annotated_tsv or not os.path.exists(self.annotated_tsv):
             raise FileNotFoundError(f"Annotated file not found: {self.annotated_tsv}")
 
         df = pd.read_csv(self.annotated_tsv, sep='\t', low_memory=False)
 
-        if 'Total_Score' not in df.columns:
-            logger.warning("Total_Score column not found, skipping auROC calculation")
-            return {}
-
+        # ── ground-truth labels ────────────────────────────────────────────────
         y_true = self._get_true_labels(df)
-        if y_true is None or len(y_true) == 0:
-            logger.warning("No ground truth labels found")
+        if y_true is None:
+            return {}
+        if len(y_true) == 0:
+            logger.warning("Label array is empty – skipping auROC calculation")
             return {}
 
-        scores = {}
-        score_columns = [col for col in df.columns if 'Score' in col or 'score' in col.lower()]
+        n_pos = int(y_true.sum())
+        logger.info(
+            f"Ground truth: {n_pos} / {len(y_true)} = "
+            f"{n_pos / max(len(y_true), 1):.1%} positive")
+
+        if n_pos == 0:
+            logger.warning(
+                "All labels are negative (0 positives). "
+                "auROC will be NaN – consider checking your label extraction.")
+        elif n_pos == len(y_true):
+            logger.warning("All labels are positive – degenerate case.")
+
+        # ── score columns ─────────────────────────────────────────────────────
+        from .visualization import extract_score_columns
+
+        score_columns = extract_score_columns(df)
+        logger.info(f"Score columns found: {score_columns}")
+
+        if not score_columns:
+            logger.warning("No numeric score columns found in annotated TSV")
+            return {}
+
+        # ── per-column metric computation ─────────────────────────────────────
+        from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
+
+        scores: Dict[str, Dict[str, Any]] = {}
 
         for col in score_columns:
-            if col == 'Total_Score':
-                continue
-
             y_scores = pd.to_numeric(df[col], errors='coerce').values
             valid_mask = ~np.isnan(y_scores)
+            n_valid = int(valid_mask.sum())
 
-            if valid_mask.sum() < 10:
-                logger.debug(f"Skipping {col}: insufficient valid scores")
+            if n_valid < 2:
+                logger.warning(f"  '{col}': only {n_valid} valid score(s) – skipped")
                 continue
 
-            from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
+            if n_valid < 10:
+                logger.warning(
+                    f"  '{col}': {n_valid} valid score(s) < 10 – "
+                    f"computing but results may be unreliable")
 
             try:
-                auroc = roc_auc_score(y_true[valid_mask], y_scores[valid_mask])
-                auprc = average_precision_score(y_true[valid_mask], y_scores[valid_mask])
+                try:
+                    auroc = roc_auc_score(y_true[valid_mask], y_scores[valid_mask])
+                except ValueError:
+                    auroc = float('nan')
 
-                fpr, tpr, _ = roc_curve(y_true[valid_mask], y_scores[valid_mask])
+                try:
+                    auprc = average_precision_score(
+                        y_true[valid_mask], y_scores[valid_mask])
+                except ValueError:
+                    auprc = float('nan')
+
+                fpr_arr, tpr_arr, _ = roc_curve(
+                    y_true[valid_mask], y_scores[valid_mask])
 
                 scores[col] = {
-                    'auroc': round(float(auroc), 4),
-                    'auprc': round(float(auprc), 4),
+                    'auroc': round(float(auroc), 4)
+                    if not np.isnan(float(auroc)) else float('nan'),
+                    'auprc': round(float(auprc), 4)
+                    if not np.isnan(float(auprc)) else float('nan'),
                     'roc_curve': {
-                        'fpr': fpr.tolist(),
-                        'tpr': tpr.tolist()
+                        'fpr': fpr_arr.tolist(),
+                        'tpr': tpr_arr.tolist(),
                     },
-                    'n_variants': int(valid_mask.sum())
+                    'n_variants': n_valid,
                 }
+                logger.info(
+                    f"  {col}: AUROC={scores[col]['auroc']:.4f}  "
+                    f"AUPRC={scores[col]['auprc']:.4f}  (n={n_valid})")
 
-                logger.info(f"  {col}: AUROC={auroc:.4f}, AUPRC={auprc:.4f}")
-
-            except Exception as e:
-                logger.warning(f"Failed to calculate metrics for {col}: {e}")
+            except Exception as exc:
+                logger.warning(f"  Failed to calculate metrics for '{col}': {exc}")
 
         return scores
 
@@ -406,86 +445,45 @@ class MatchingPipeline:
 
     def _generate_visualizations(self, scores: Dict[str, Dict]) -> Dict[str, str]:
         """
-        Generate ROC curves and auROC comparison bar plots
+        Generate ROC curves, auROC comparison bar plots, and (when scores are
+        empty) diagnostic / exploratory figures so the pipeline always produces
+        visual output rather than silently returning nothing.
 
         Args:
             scores: Dictionary of metric scores per tool
 
         Returns:
-            Dictionary mapping figure names to file paths
+            Dictionary mapping figure keys to file paths
         """
-        if not scores:
-            logger.warning("No scores available for visualization")
-            return {}
-
-        figures = {}
-
-        from matplotlib import pyplot as plt
-        import seaborn as sns
-        sns.set_style("whitegrid")
-        plt.rcParams['figure.dpi'] = 300
+        from .visualization import (create_summary_figure,
+                                    create_diagnostic_figures)
 
         fig_dir = os.path.join(self.output_dir, 'figures')
         Path(fig_dir).mkdir(parents=True, exist_ok=True)
 
-        # Figure 1: ROC curves for all tools
-        fig_roc, ax_roc = plt.subplots(figsize=(8, 8))
+        if scores:
+            figures = create_summary_figure(
+                tool_metrics=scores,
+                gene_name=self.gene_name,
+                output_dir=fig_dir,
+                prefix=f"{self.gene_name}_performance",
+            )
+            logger.info(f"Generated {len(figures)} performance figures")
+            return figures
 
-        for tool_name, metrics in scores.items():
-            if 'roc_curve' in metrics:
-                fpr = np.array(metrics['roc_curve']['fpr'])
-                tpr = np.array(metrics['roc_curve']['tpr'])
-                ax_roc.plot(fpr, tpr, lw=2,
-                           label=f"{tool_name} (AUROC={metrics['auroc']:.3f})")
+        # ── No metrics – produce diagnostic figures instead of returning empty ──
+        logger.info("No auROC scores available; producing diagnostic figures")
+        tsv_path  = self.annotated_tsv
+        vcf_path  = self.simulated_vcf  # known path set during simulation
 
-        ax_roc.plot([0, 1], [0, 1], 'k--', lw=1, alpha=0.7)
-        ax_roc.set_xlabel('False Positive Rate', fontsize=12)
-        ax_roc.set_ylabel('True Positive Rate', fontsize=12)
-        ax_roc.set_title(f'ROC Curves - {self.gene_name}', fontsize=14, fontweight='bold')
-        ax_roc.legend(loc='lower right', fontsize=10)
-        ax_roc.grid(True, alpha=0.3)
-
-        roc_path = os.path.join(fig_dir, f"{self.gene_name}_roc_curves.png")
-        fig_roc.savefig(roc_path, dpi=300, bbox_inches='tight')
-        figures['roc_curves'] = roc_path
-        logger.info(f"ROC curves saved: {roc_path}")
-
-        # Figure 2: auROC comparison bar plot
-        fig_bar, ax_bar = plt.subplots(figsize=(10, 6))
-
-        tools = list(scores.keys())
-        aurocs = [scores[t]['auroc'] for t in tools]
-
-        bars = ax_bar.barh(range(len(tools)), aurocs, color='steelblue', alpha=0.8)
-
-        for i, (bar, val) in enumerate(zip(bars, aurocs)):
-            ax_bar.text(val + 0.01, bar.get_y() + bar.get_height()/2,
-                       f"{val:.3f}", va='center', fontsize=10)
-
-        ax_bar.set_yticks(range(len(tools)))
-        ax_bar.set_yticklabels(tools, fontsize=11)
-        ax_bar.set_xlabel('auROC Score', fontsize=12)
-        ax_bar.set_title(f'Annotation Tool Performance - {self.gene_name}',
-                        fontsize=14, fontweight='bold')
-        ax_bar.set_xlim(0, 1.05)
-        ax_bar.grid(True, axis='x', alpha=0.3)
-
-        bar_path = os.path.join(fig_dir, f"{self.gene_name}_auroc_comparison.png")
-        fig_bar.savefig(bar_path, dpi=300, bbox_inches='tight')
-        figures['auroc_comparison'] = bar_path
-        logger.info(f"auROC comparison saved: {bar_path}")
-
-        # Also save PDF versions for publication
-        pdf_roc = roc_path.replace('.png', '.pdf')
-        pdf_bar = bar_path.replace('.png', '.pdf')
-        fig_roc.savefig(pdf_roc, format='pdf', bbox_inches='tight')
-        fig_bar.savefig(pdf_bar, format='pdf', bbox_inches='tight')
-        figures['roc_curves_pdf'] = pdf_roc
-        figures['auroc_comparison_pdf'] = pdf_bar
-
-        plt.close('all')
-
-        return figures
+        diag = create_diagnostic_figures(
+            annotated_tsv=tsv_path,
+            gene_name=self.gene_name,
+            output_dir=fig_dir,
+            vcf_path=vcf_path,
+        )
+        logger.info(f"Generated {len(diag['figures'])} diagnostic figures")
+        return {k: v for k, v in diag.get('figures', {}).items()}
 
     def _save_summary(self, results: Dict[str, Any]):
         """Save pipeline summary as JSON"""
