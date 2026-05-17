@@ -30,19 +30,19 @@ logger = logging.getLogger(__name__)
 
 
 def simulate_variants(gtf_file: str,
-                      fasta_file: str,
-                      gene_name: str,
-                      transcript_id: str,
-                      output_vcf: str,
-                      variant_types: Optional[List[str]] = None,
-                      max_indel_length: int = 15,
-                      min_indel_length: int = 1,
-                      synonymous: bool = True,
-                      include_stop_codon: bool = True,
-                      max_splice_offset: int = 20,
-                      min_splice_offset: int = 1,
-                      include_classic_splice_sites: bool = True,
-                      max_variants: Optional[int] = None) -> GeneTranscript:
+                       fasta_file: str,
+                       gene_name: str,
+                       transcript_id: str,
+                       output_vcf: str,
+                       variant_types: Optional[List[str]] = None,
+                       max_indel_length: int = 5,
+                       min_indel_length: int = 1,
+                       synonymous: bool = True,
+                       include_stop_codon: bool = True,
+                       max_splice_offset: int = 20,
+                       min_splice_offset: int = 1,
+                       include_classic_splice_sites: bool = True,
+                       max_variants: Optional[int] = None) -> Tuple[GeneTranscript, Dict]:
     """
     Extract exon data from GTF/FASTA, generate variants, and export to VCF.
 
@@ -94,7 +94,7 @@ def simulate_variants(gtf_file: str,
     # Step 4: Export to VCF
     transcript.export_to_vcf(variants, output_vcf)
 
-    return transcript
+    return transcript, variants
 
 
 class MatchingPipeline:
@@ -106,25 +106,25 @@ class MatchingPipeline:
     """
 
     def __init__(self,
-                 gtf_file: str,
-                 fasta_file: str,
-                 gene_name: str,
-                 transcript_id: str,
-                 database_dir: str,
-                 output_dir: str,
-                 protocols: Optional[List[str]] = None,
-                 operations: Optional[List[str]] = None,
-                 variant_types: Optional[List[str]] = None,
-                 buildver: str = 'hg19',
-                 threads: int = 4,
-                 max_indel_length: int = 15,
-                 min_indel_length: int = 1,
-                 synonymous: bool = True,
-                 include_stop_codon: bool = True,
-                 max_splice_offset: int = 20,
-                 min_splice_offset: int = 1,
-                 include_classic_splice_sites: bool = True,
-                 max_variants: Optional[int] = None):
+                  gtf_file: str,
+                  fasta_file: str,
+                  gene_name: str,
+                  transcript_id: str,
+                  database_dir: str,
+                  output_dir: str,
+                  protocols: Optional[List[str]] = None,
+                  operations: Optional[List[str]] = None,
+                  variant_types: Optional[List[str]] = None,
+                  buildver: str = 'hg19',
+                  threads: int = 4,
+                  max_indel_length: int = 6,
+                  min_indel_length: int = 1,
+                  synonymous: bool = True,
+                  include_stop_codon: bool = True,
+                  max_splice_offset: int = 20,
+                  min_splice_offset: int = 1,
+                  include_classic_splice_sites: bool = True,
+                  max_variants: Optional[int] = None):
         """
         Initialize the matching pipeline
 
@@ -255,7 +255,8 @@ class MatchingPipeline:
         """Run variant simulation"""
         self.simulated_vcf = os.path.join(self.output_dir, f"{self.gene_name}_simulated.vcf")
 
-        self.transcript = simulate_variants(
+        # Run simulation and get both transcript and variants
+        self.transcript, variants_dict = simulate_variants(
             gtf_file=self.gtf_file,
             fasta_file=self.fasta_file,
             gene_name=self.gene_name,
@@ -272,11 +273,10 @@ class MatchingPipeline:
             max_variants=self.max_variants,
         )
 
-        # Get variants by loading from VCF or regenerate
-        variants_result = self.transcript.generate_all_variants(variant_types=self.variant_types)
-        self.variants = variants_result
-        # Extract variant lists (excluding the 'total' key)
-        variant_lists = {k: v for k, v in variants_result.items() if k != 'total'}
+        # Use the variants directly from simulation (no need to regenerate)
+        self.variants = variants_dict
+        # Extract variant lists (excluding the 'total' key if present)
+        variant_lists = {k: v for k, v in variants_dict.items() if k != 'total'}
         total = sum(len(v) for v in variant_lists.values()) if isinstance(variant_lists, dict) else 0
         logger.info(f"Generated {total} variants")
 
