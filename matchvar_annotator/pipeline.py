@@ -22,6 +22,7 @@ import json
 
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 from .variant_simulation import GeneTranscript, ExonExtractor
 from .table_matchvar import TableAnnotator
@@ -311,6 +312,198 @@ class MatchingPipeline:
         # Update the annotated_tsv to point to the actual output file
         self.annotated_tsv = actual_output
         logger.info(f"Annotation completed: {self.annotated_tsv}")
+
+    def _load_and_preprocess_tsv(self, tsv_path: str) -> pd.DataFrame:
+        """
+        Load TSV and preprocess for calibration/evaluation.
+        
+        - Filters ClinicalSignificance to 6 allowed values
+        - Extracts TOTAL_SCORE from Otherinfo11 where TYPE=SNV
+        - Creates binary Label column
+        """
+        import re
+        
+        df = pd.read_csv(tsv_path, sep='\t', low_memory=False)
+        
+        valid_clinical = ['Benign/Likely benign', 'Likely benign', 'Benign',
+                          'Pathogenic/Likely pathogenic', 'Pathogenic', 'Likely pathogenic']
+        
+        if 'ClinicalSignificance' in df.columns:
+            df = df[df['ClinicalSignificance'].isin(valid_clinical)].copy()
+        
+        type_pattern = re.compile(r'TYPE=SNV')
+        total_score_pattern = re.compile(r'TOTAL_SCORE=([0-9.+-eE]+)')
+        
+        def extract_total_score(row):
+            for col in row.index:
+                if col.startswith('Otherinfo') and pd.notna(row[col]):
+                    text = str(row[col])
+                    if type_pattern.search(text):
+                        match = total_score_pattern.search(text)
+                        if match:
+                            return float(match.group(1))
+            return np.nan
+        
+        df['TOTAL_SCORE'] = df.apply(extract_total_score, axis=1)
+        
+        def get_label(clinical_sig):
+            if pd.isna(clinical_sig):
+                return np.nan
+            sig_lower = str(clinical_sig).lower()
+            if 'benign' in sig_lower:
+                return 0
+            elif 'pathogenic' in sig_lower:
+                return 1
+            return np.nan
+        
+        df['Label'] = df['ClinicalSignificance'].apply(get_label)
+        
+        return df
+
+    def _run_calibration(self, clinvar_validation_set_path: str):
+        """
+        Calibrate TOTAL_SCORE using gene-specific or global ClinVar data.
+        
+        Trains a LogisticRegression model on ClinVar variants and applies
+        it to the simulated variants to obtain calibrated harmfulness scores.
+        """
+        from sklearn.linear_model import LogisticRegression
+        
+        df_sim = self._load_and_preprocess_tsv(self.annotated_tsv)
+        
+        if 'TOTAL_SCORE' not in df_sim.columns or df_sim['TOTAL_SCORE'].isna().all():
+            raise ValueError("No TOTAL_SCORE values found in simulated variants")
+        
+        df_clinvar = self._load_and_preprocess_tsv(clinvar_validation_set_path)
+        
+        df_gene = df_clinvar[
+            df_clinvar['Gene'].str.upper() == self.gene_name.upper()
+        ].copy() if 'Gene' in df_clinvar.columns else pd.DataFrame()
+        
+        use_global = False
+        if len(df_gene) < 10 or df_gene['Label'].nunique() < 2:
+            logger.warning(
+                f"Insufficient gene-specific ClinVar data for {self.gene_name} "
+                f"(n={len(df_gene)}, unique labels={df_gene['Label'].nunique()}). "
+                "Falling back to global ClinVar model."
+            )
+            use_global = True
+            train_df = df_clinvar[df_clinvar['Label'].notna()].copy()
+        else:
+            train_df = df_gene[df_gene['Label'].notna()].copy()
+        
+        if len(train_df) < 10 or train_df['Label'].nunique() < 2:
+            raise ValueError(
+                "Insufficient training data for calibration (need ≥10 samples with both classes)"
+            )
+        
+        X_train = train_df['TOTAL_SCORE'].values.reshape(-1, 1)
+        y_train = train_df['Label'].values
+        
+        model = LogisticRegression(random_state=42, max_iter=1000)
+        model.fit(X_train, y_train)
+        logger.info(
+            f"Trained {'gene-specific' if not use_global else 'global'} "
+            f"LogisticRegression on {len(train_df)} ClinVar variants"
+        )
+        
+        valid_mask = df_sim['TOTAL_SCORE'].notna()
+        df_sim.loc[valid_mask, 'calibrated_score'] = model.predict_proba(
+            df_sim.loc[valid_mask, 'TOTAL_SCORE'].values.reshape(-1, 1)
+        )[:, 1]
+        
+        self.calibrated_scores = df_sim['calibrated_score'].values
+        self.df_calibrated = df_sim
+        
+        calibrated_output = os.path.join(
+            self.output_dir, f"{self.gene_name}_calibrated_scores.tsv"
+        )
+        df_sim.to_csv(calibrated_output, sep='\t', index=False)
+        logger.info(f"Calibrated scores saved to: {calibrated_output}")
+
+    def _run_evaluation(self):
+        """
+        Compute auROC for am_pathogenicity and calibrated scores,
+        and generate publication-quality ROC comparison figure.
+        """
+        from sklearn.metrics import roc_auc_score, roc_curve
+        
+        if not hasattr(self, 'df_calibrated') or self.df_calibrated is None:
+            raise RuntimeError(
+                "Run _run_calibration first before evaluation"
+            )
+        
+        df = self.df_calibrated
+        valid_mask = df['Label'].notna()
+        
+        if valid_mask.sum() == 0:
+            raise ValueError("No valid labels for evaluation")
+        
+        y_true = df.loc[valid_mask, 'Label'].values
+        
+        scores_to_eval = {}
+        
+        if 'am_pathogenicity' in df.columns:
+            am_scores = pd.to_numeric(df.loc[valid_mask, 'am_pathogenicity'], errors='coerce').values
+            if not np.isnan(am_scores).all():
+                scores_to_eval['am_pathogenicity'] = am_scores
+        
+        if 'calibrated_score' in df.columns:
+            cal_scores = pd.to_numeric(df.loc[valid_mask, 'calibrated_score'], errors='coerce').values
+            if not np.isnan(cal_scores).all():
+                scores_to_eval['calibrated_score'] = cal_scores
+        
+        auroc_results = {}
+        roc_curves = {}
+        
+        for name, scores in scores_to_eval.items():
+            valid_idx = ~np.isnan(scores)
+            if valid_idx.sum() >= 2:
+                try:
+                    auroc = roc_auc_score(y_true[valid_idx], scores[valid_idx])
+                    fpr, tpr, _ = roc_curve(y_true[valid_idx], scores[valid_idx])
+                    auroc_results[name] = auroc
+                    roc_curves[name] = {'fpr': fpr, 'tpr': tpr}
+                    logger.info(f"{name} auROC: {auroc:.4f}")
+                except Exception as e:
+                    logger.warning(f"Failed to compute auROC for {name}: {e}")
+        
+        self.auroc_results = auroc_results
+        
+        fig, ax = plt.subplots(figsize=(8, 8), dpi=300)
+        
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        ax.plot([0, 1], [0, 1], color='gray', lw=1, ls=':', alpha=0.7)
+        
+        colors = {'calibrated_score': '#D62728', 'am_pathogenicity': '#1F77B4'}
+        linestyles = {'calibrated_score': '-', 'am_pathogenicity': '--'}
+        linewidths = {'calibrated_score': 2.5, 'am_pathogenicity': 2.0}
+        
+        for name, color in [('calibrated_score', '#D62728'), ('am_pathogenicity', '#1F77B4')]:
+            if name in roc_curves:
+                fpr = roc_curves[name]['fpr']
+                tpr = roc_curves[name]['tpr']
+                auroc = auroc_results[name]
+                label_name = 'Calibrated Score' if name == 'calibrated_score' else 'am_pathogenicity'
+                ax.plot(fpr, tpr, color=color, lw=linewidths.get(name, 2.0),
+                        ls=linestyles.get(name, '-'),
+                        label=f"{label_name}  (AUC={auroc:.3f})")
+        
+        ax.set_xlim(0.0, 1.0)
+        ax.set_ylim(0.0, 1.05)
+        ax.set_xlabel('False Positive Rate', fontweight='bold')
+        ax.set_ylabel('True Positive Rate', fontweight='bold')
+        ax.set_title(f'ROC Curve Comparison for {self.gene_name}', fontweight='bold', fontsize=14)
+        ax.legend(loc='lower right', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        
+        pdf_path = os.path.join(self.output_dir, f"{self.gene_name}_ROC_comparison.pdf")
+        fig.savefig(pdf_path, dpi=300, bbox_inches='tight', format='pdf')
+        plt.close(fig)
+        
+        logger.info(f"ROC comparison figure saved: {pdf_path}")
 
     def _calculate_auroc_scores(self) -> Dict[str, Dict[str, Any]]:
         """
