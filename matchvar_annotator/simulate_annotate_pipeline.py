@@ -102,8 +102,18 @@ Examples:
     required.add_argument('--output_dir', required=True,
                          help='Output directory for all results')
     # Add multi genes output mode
-    required.add_argument("--merge_output", action="store_true", default=False,
-                        help="True=merge into one VCF; False=each gene separate (default)")
+    def _parse_bool(v):
+        v = v.strip().lower()
+        if v in ('true', 't', 'yes', 'y', '1'):
+            return True
+        if v in ('false', 'f', 'no', 'n', '0'):
+            return False
+        raise argparse.ArgumentTypeError(f"Invalid boolean value: {v!r}")
+
+    required.add_argument("--merge_output", nargs='?', const=True, default=False,
+                          type=_parse_bool,
+                          help="True=merge all genes into one VCF/annotation; False=each gene separate (default). "
+                               "Usage: --merge_output or --merge_output TRUE/FALSE")
 
 
     # Optional arguments
