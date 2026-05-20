@@ -286,54 +286,39 @@ class MatchingPipeline:
 
     def _run_annotation(self):
         """Run table annotation"""
-        # The TableAnnotator will create a file with genome version suffix
-        self.annotated_tsv = os.path.join(self.output_dir, f"{self.gene_name}_annotated.tsv")
-        actual_output = os.path.join(self.output_dir, f"{self.gene_name}_annotated.{self.buildver}_multianno.tsv")
-
-        annotator = TableAnnotator(
-            queryfile=self.simulated_vcf,
-            dbloc=self.database_dir,
-            outfile=os.path.join(self.output_dir, f"{self.gene_name}_annotated"),
+        self.annotated_tsv = _run_annotation_for_vcf(
+            simulated_vcf=self.simulated_vcf,
+            output_dir=self.output_dir,
+            gene_name=self.gene_name,
+            database_dir=self.database_dir,
             buildver=self.buildver,
-            protocol=','.join(self.protocols),
-            operation=','.join(self.operations),
-            thread=self.threads,
-            vcfinput=True,
-            otherinfo=True,
-            remove=True
+            protocols=self.protocols,
+            operations=self.operations,
+            threads=self.threads,
         )
-
-        annotator.run_annotation()
-
-        # Check if the expected output file exists
-        if not os.path.exists(actual_output):
-            raise FileNotFoundError(f"Annotation output not found: {actual_output}")
-        
-        # Update the annotated_tsv to point to the actual output file
-        self.annotated_tsv = actual_output
         logger.info(f"Annotation completed: {self.annotated_tsv}")
 
     def _load_and_preprocess_tsv(self, tsv_path: str) -> pd.DataFrame:
         """
         Load TSV and preprocess for calibration/evaluation.
-        
+
         - Filters ClinicalSignificance to 6 allowed values
         - Extracts TOTAL_SCORE from Otherinfo11 where TYPE=SNV
         - Creates binary Label column
         """
         import re
-        
+
         df = pd.read_csv(tsv_path, sep='\t', low_memory=False)
-        
+
         valid_clinical = ['Benign/Likely benign', 'Likely benign', 'Benign',
                           'Pathogenic/Likely pathogenic', 'Pathogenic', 'Likely pathogenic']
-        
+
         if 'ClinicalSignificance' in df.columns:
             df = df[df['ClinicalSignificance'].isin(valid_clinical)].copy()
-        
+
         type_pattern = re.compile(r'TYPE=SNV')
         total_score_pattern = re.compile(r'TOTAL_SCORE=([0-9.+-eE]+)')
-        
+
         def extract_total_score(row):
             for col in row.index:
                 if col.startswith('Otherinfo') and pd.notna(row[col]):
@@ -343,9 +328,9 @@ class MatchingPipeline:
                         if match:
                             return float(match.group(1))
             return np.nan
-        
+
         df['TOTAL_SCORE'] = df.apply(extract_total_score, axis=1)
-        
+
         def get_label(clinical_sig):
             if pd.isna(clinical_sig):
                 return np.nan
@@ -355,22 +340,20 @@ class MatchingPipeline:
             elif 'pathogenic' in sig_lower:
                 return 1
             return np.nan
-        
+
         df['Label'] = df['ClinicalSignificance'].apply(get_label)
-        
+
         return df
 
     def _run_calibration(self, clinvar_validation_set_path: str):
         """
         Calibrate TOTAL_SCORE using gene-specific or global ClinVar data.
-        
+
         Trains a LogisticRegression model on ClinVar variants and applies
         it to the simulated variants to obtain calibrated harmfulness scores.
         """
-        from sklearn.linear_model import LogisticRegression
-        
         df_sim = self._load_and_preprocess_tsv(self.annotated_tsv)
-        
+
         if 'TOTAL_SCORE' not in df_sim.columns or df_sim['TOTAL_SCORE'].isna().all():
             raise ValueError("No TOTAL_SCORE values found in simulated variants")
         
@@ -688,7 +671,6 @@ class MatchingPipeline:
             logger.error(f"Error extracting true labels: {exc}")
             return None
 
-
     def _generate_visualizations(self, scores: Dict[str, Dict]) -> Dict[str, str]:
         """
         Generate ROC curves, auROC comparison bar plots, and (when scores are
@@ -731,42 +713,7 @@ class MatchingPipeline:
         logger.info(f"Generated {len(diag['figures'])} diagnostic figures")
         return {k: v for k, v in diag.get('figures', {}).items()}
 
-    def _save_summary(self, results: Dict[str, Any]):
-        """Save pipeline summary as JSON"""
-        summary_file = os.path.join(self.output_dir, f"{self.gene_name}_pipeline_summary.json")
-
-        summary = {
-            'gene_name': results['gene_name'],
-            'transcript_id': results['transcript_id'],
-            'timestamp': datetime.now().isoformat(),
-            'total_variants': results['total_variants'],
-            'simulated_vcf': results['simulated_vcf'],
-            'annotated_tsv': results['annotated_tsv'],
-            'auroc_scores': results['auroc_scores'],
-            'figures': {k: v for k, v in results['figures'].items() if k.endswith('_pdf')}
-        }
-
-        with open(summary_file, 'w', encoding='utf-8') as f:
-            json.dump(summary, f, indent=2)
-
-        logger.info(f"Summary saved: {summary_file}")
-
-        # Also create a TSV statistics table
-        stats_file = os.path.join(self.output_dir, f"{self.gene_name}_auroc_statistics.tsv")
-        if results['auroc_scores']:
-            stats_df = pd.DataFrame([
-                {
-                    'Tool': tool,
-                    'AUROC': metrics['auroc'],
-                    'AUPRC': metrics['auprc'],
-                    'N_Variants': metrics['n_variants']
-                }
-                for tool, metrics in results['auroc_scores'].items()
-            ])
-            stats_df.to_csv(stats_file, sep='\t', index=False)
-            logger.info(f"Statistics table saved: {stats_file}")
-
-
+# create labels from vcf 
 def _labels_from_vcf_info(vcf_path: str) -> Optional[np.ndarray]:
     """
     Parse VCF INFO and return per-position binary labels.
@@ -856,33 +803,252 @@ def _labels_from_vcf_info(vcf_path: str) -> Optional[np.ndarray]:
             logger.info(f"Statistics table saved: {stats_file}")
 
 
+def _run_annotation_for_vcf(
+    simulated_vcf: str,
+    output_dir: str,
+    gene_name: str,
+    database_dir: str,
+    buildver: str,
+    protocols: List[str],
+    operations: List[str],
+    threads: int,
+) -> str:
+    """
+    Standalone annotation helper: annotate a simulated VCF and return the
+    path to the resulting multi-anno TSV.
+
+    Used by both MatchingPipeline._run_annotation() and the merge-output
+    path in run_pipeline() so that no dummy MatchingPipeline object is needed.
+    """
+    actual_output = os.path.join(output_dir, f"{gene_name}_annotated.{buildver}_multianno.tsv")
+
+    annotator = TableAnnotator(
+        queryfile=simulated_vcf,
+        dbloc=database_dir,
+        outfile=os.path.join(output_dir, f"{gene_name}_annotated"),
+        buildver=buildver,
+        protocol=','.join(protocols),
+        operation=','.join(operations),
+        thread=threads,
+        vcfinput=True,
+        otherinfo=True,
+        remove=True,
+    )
+
+    annotator.run_annotation()
+
+    if not os.path.exists(actual_output):
+        raise FileNotFoundError(f"Annotation output not found: {actual_output}")
+
+    logger.info(f"Annotation completed: {actual_output}")
+    return actual_output
+
+
+# old run pipeline
+# def run_pipeline(gtf_file: str, fasta_file: str, gene_name: str, transcript_id: str,
+#                  database_dir: str, output_dir: str, **kwargs) -> Dict[str, Any]:
+#     """
+#     Run pipeline directly from Python code
+
+#     Args:
+#         gtf_file: Path to GTF file
+#         fasta_file: Path to reference genome FASTA
+#         gene_name: Gene symbol
+#         transcript_id: Transcript ID
+#         database_dir: Database directory
+#         output_dir: Output directory
+#         **kwargs: Additional arguments for MatchingPipeline
+
+#     Returns:
+#         Dictionary with pipeline results
+#     """
+#     pipeline = MatchingPipeline(
+#         gtf_file=gtf_file,
+#         fasta_file=fasta_file,
+#         gene_name=gene_name,
+#         transcript_id=transcript_id,
+#         database_dir=database_dir,
+#         output_dir=output_dir,
+#         **kwargs
+#     )
+#     return pipeline.run()
+
+# new run pipeline
 def run_pipeline(gtf_file: str, fasta_file: str, gene_name: str, transcript_id: str,
-                 database_dir: str, output_dir: str, **kwargs) -> Dict[str, Any]:
+                 database_dir: str, output_dir: str, merge_output: bool = False, **kwargs) -> Dict[str, Any]:
     """
     Run pipeline directly from Python code
 
     Args:
         gtf_file: Path to GTF file
         fasta_file: Path to reference genome FASTA
-        gene_name: Gene symbol
-        transcript_id: Transcript ID
+        gene_name: Gene symbol(s), comma-separated for multiple
+        transcript_id: Transcript ID(s), comma-separated matching genes
         database_dir: Database directory
         output_dir: Output directory
+        merge_output: If True, merge all genes into one VCF/annotation; False = separate files
         **kwargs: Additional arguments for MatchingPipeline
 
     Returns:
         Dictionary with pipeline results
     """
-    pipeline = MatchingPipeline(
-        gtf_file=gtf_file,
-        fasta_file=fasta_file,
-        gene_name=gene_name,
-        transcript_id=transcript_id,
-        database_dir=database_dir,
-        output_dir=output_dir,
-        **kwargs
-    )
-    return pipeline.run()
+    # Analyzing multiple genes/transcripts
+    gene_list = [g.strip() for g in gene_name.split(",") if g.strip()]
+    tx_list = [t.strip() for t in transcript_id.split(",") if t.strip()]
+
+    if len(gene_list) != len(tx_list):
+        raise ValueError(f"Gene counts({len(gene_list)}) != Transcript counts({len(tx_list)})")
+
+    # ===================== Single gene =====================
+    if len(gene_list) == 1:
+        pipeline = MatchingPipeline(
+            gtf_file=gtf_file,
+            fasta_file=fasta_file,
+            gene_name=gene_list[0],
+            transcript_id=tx_list[0],
+            database_dir=database_dir,
+            output_dir=output_dir,
+            **kwargs
+        )
+        return pipeline.run()
+
+    # ===================== Multi genes =====================
+    from collections import OrderedDict
+    all_results = {}
+    merged_vcf = os.path.join(output_dir, "multi_genes_simulated.vcf")
+    vcf_lines = []
+
+    # Run one by one
+    for gene, tx in zip(gene_list, tx_list):
+        if not merge_output:
+            gene_out = os.path.join(output_dir, f"gene_{gene}")
+            Path(gene_out).mkdir(parents=True, exist_ok=True)
+        else:
+            gene_out = output_dir
+
+        pipeline = MatchingPipeline(
+            gtf_file=gtf_file,
+            fasta_file=fasta_file,
+            gene_name=gene,
+            transcript_id=tx,
+            database_dir=database_dir,
+            output_dir=gene_out,
+            **kwargs
+        )
+
+        logger.info(f"\n=== Running for gene: {gene} | {tx} ===")
+        res = pipeline.run()
+        all_results[gene] = res
+
+        # merge VCF
+        if merge_output and os.path.exists(res["simulated_vcf"]):
+            with open(res["simulated_vcf"], 'r') as f:
+                for line in f:
+                    line = line.rstrip("\n")
+                    if line.startswith("##"):
+                        # Keep ## meta-headers from the first file only
+                        if not vcf_lines:
+                            vcf_lines.append(line)
+                    elif line.startswith("#"):
+                        # Keep #CHROM header line from the first file only
+                        if not any(l.startswith("#CHROM") for l in vcf_lines):
+                            vcf_lines.append(line)
+                    else:
+                        # Always keep variant data lines
+                        vcf_lines.append(line)
+
+    # Write merged VCF and all annotation
+    merged_main_result = None
+    if merge_output:
+        with open(merged_vcf, 'w') as f:
+            f.write("\n".join(vcf_lines) + "\n")
+
+        # Annotate the merged VCF using the standalone helper (no dummy pipeline needed)
+        logger.info("\n=== Merged annotation ===")
+        merged_annotated_tsv = _run_annotation_for_vcf(
+            simulated_vcf=merged_vcf,
+            output_dir=output_dir,
+            gene_name="merged_genes",
+            database_dir=database_dir,
+            buildver=kwargs.get('buildver', 'hg19'),
+            protocols=kwargs.get('protocols', ['refGene']),
+            operations=kwargs.get('operations', ['g']),
+            threads=kwargs.get('threads', 4),
+        )
+        scores = _calculate_auroc_scores_from_tsv(merged_annotated_tsv, merged_vcf)
+        figs = _generate_visualizations_for_scores(scores, output_dir, "merged_genes")
+        merged_main_result = {
+            "gene_name": "merged_genes",
+            "transcript_id": "merged_transcripts",
+            "simulated_vcf": merged_vcf,
+            "annotated_tsv": merged_annotated_tsv,
+            "auroc_scores": scores,
+            "figures": figs,
+            "all_gene_results": all_results
+        }
+        _save_summary_for_result(merged_main_result, output_dir, "merged_genes")
+        return merged_main_result
+
+    return {"mode": "separate_output", "all_gene_results": all_results}
+
+
+def _calculate_auroc_scores_from_tsv(annotated_tsv: str, vcf_path: str) -> Dict:
+    """Standalone auROC calculation from an annotated TSV path."""
+    import tempfile
+    tmp = type('TmpPipeline', (), {})()
+    tmp.annotated_tsv = annotated_tsv
+    tmp.simulated_vcf = vcf_path
+    # Reuse the instance method via a temporary object
+    return MatchingPipeline._calculate_auroc_scores(tmp)
+
+
+def _generate_visualizations_for_scores(
+    scores: Dict, output_dir: str, gene_name: str
+) -> Dict[str, str]:
+    """Standalone visualization generation from scores dict."""
+    from .visualization import create_summary_figure, create_diagnostic_figures
+    fig_dir = os.path.join(output_dir, 'figures')
+    Path(fig_dir).mkdir(parents=True, exist_ok=True)
+    if scores:
+        return create_summary_figure(
+            tool_metrics=scores,
+            gene_name=gene_name,
+            output_dir=fig_dir,
+            prefix=f"{gene_name}_performance",
+        )
+    return {}
+
+
+def _save_summary_for_result(results: Dict[str, Any], output_dir: str, gene_name: str):
+    """Standalone summary saver for a results dict."""
+    summary_file = os.path.join(output_dir, f"{gene_name}_pipeline_summary.json")
+    summary = {
+        'gene_name': results.get('gene_name', gene_name),
+        'transcript_id': results.get('transcript_id', ''),
+        'timestamp': datetime.now().isoformat(),
+        'total_variants': results.get('total_variants', 0),
+        'simulated_vcf': results.get('simulated_vcf', ''),
+        'annotated_tsv': results.get('annotated_tsv', ''),
+        'auroc_scores': results.get('auroc_scores', {}),
+        'figures': {k: v for k, v in results.get('figures', {}).items() if k.endswith('_pdf')}
+    }
+    with open(summary_file, 'w', encoding='utf-8') as f:
+        json.dump(summary, f, indent=2)
+    logger.info(f"Summary saved: {summary_file}")
+
+    stats_file = os.path.join(output_dir, f"{gene_name}_auroc_statistics.tsv")
+    if results.get('auroc_scores'):
+        stats_df = pd.DataFrame([
+            {
+                'Tool': tool,
+                'AUROC': metrics['auroc'],
+                'AUPRC': metrics['auprc'],
+                'N_Variants': metrics['n_variants']
+            }
+            for tool, metrics in results['auroc_scores'].items()
+        ])
+        stats_df.to_csv(stats_file, sep='\t', index=False)
+        logger.info(f"Statistics table saved: {stats_file}")
 
 
 def run_pipeline_from_args(args):
@@ -894,8 +1060,9 @@ def run_pipeline_from_args(args):
         transcript_id=args.transcript,
         database_dir=args.database,
         output_dir=args.output_dir,
-        protocols=args.protocol.split(',') if args.protocol else None,
-        operations=args.operation.split(',') if args.operation else None,
+        merge_output=args.merge_output,
+        protocols=args.protocols.split(',') if args.protocols else None,
+        operations=args.operations.split(',') if args.operations else None,
         variant_types=args.variant_types.split(',') if args.variant_types else None,
         buildver=args.buildver,
         threads=args.threads

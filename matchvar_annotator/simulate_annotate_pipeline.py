@@ -13,7 +13,7 @@ Usage:
         --gene BRCA1 \\
         --transcript NM_007294.4 \\
         --database /path/to/humandb \\
-        --output ./results
+        --output_dir ./results
 
 Python API:
     from matchvar_annotator import run_pipeline
@@ -36,7 +36,7 @@ from pathlib import Path
 # Add parent directory to path for package imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from .pipeline import MatchingPipeline, run_pipeline_from_args
+from .pipeline import MatchingPipeline, run_pipeline
 from . import __version__
 
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ Examples:
     --gene BRCA1 \\
     --transcript NM_007294.4 \\
     --database /data/humandb \\
-    --output ./brca1_results
+    --output_dir ./brca1_results
 
   # Customize variant types and protocols
   matchvar-pipeline \\
@@ -62,7 +62,7 @@ Examples:
     --gene TP53 \\
     --transcript NM_000546.6 \\
     --database humandb \\
-    --output tp53_results \\
+    --output_dir tp53_results \\
     --variant-types SNV,insertion,deletion,splice_site \\
     --protocols refGene,exac03,avsift \\
     --operations g,f,f \\
@@ -76,7 +76,7 @@ Examples:
     --gene CFTR \\
     --transcript auto \\
     --database humandb_hg38 \\
-    --output cftr_results \\
+    --output_dir cftr_results \\
     --buildver hg38
 """
 
@@ -94,19 +94,21 @@ Examples:
     required.add_argument('--fasta', required=True,
                          help='Path to reference genome FASTA file')
     required.add_argument('--gene', required=True,
-                         help='Gene symbol (e.g., BRCA1, TP53)')
+                         help='Single gene symbol or comma-separated Gene symbols (e.g., BRCA1 or BRCA1,TP53)')
     required.add_argument('--transcript', required=True,
-                         help='Transcript ID (e.g., NM_007294.4) or "auto" to auto-detect')
+                         help='Single transcript or comma-separated transcripts, one-to-one correspondence with --gene (e.g., NM_007294 or NM_007294,NM_000546)')
     required.add_argument('--database', required=True,
                          help='Path to annotation database directory (humandb)')
-    required.add_argument('--output', required=True,
+    required.add_argument('--output_dir', required=True,
                          help='Output directory for all results')
+    # Add multi genes output mode
+    required.add_argument("--merge_output", action="store_true", default=False,
+                        help="True=merge into one VCF; False=each gene separate (default)")
+
 
     # Optional arguments
     optional = parser.add_argument_group('Optional Arguments')
-    optional.add_argument('--variant-types',
-                         default='SNV,insertion,deletion',
-                         help='Comma-separated variant types (default: SNV,insertion,deletion)')
+    optional.add_argument('--variant-types', default='SNV,insertion,deletion', help='Comma-separated variant types (default: SNV,insertion,deletion)')
     optional.add_argument('--max-indel-length', type=int, default=15,
                          help='Maximum indel length in bp (default: 15)')
     optional.add_argument('--min-indel-length', type=int, default=1,
@@ -216,7 +218,7 @@ Examples:
             'gene_name': args.gene,
             'transcript_id': args.transcript,
             'database_dir': args.database,
-            'output_dir': args.output,
+            'output_dir': args.output_dir,
             'variant_types': [v.strip() for v in args.variant_types.split(',')],
             'protocols': [p.strip() for p in args.protocols.split(',')],
             'operations': [o.strip() for o in args.operations.split(',')],
@@ -236,31 +238,73 @@ Examples:
         for key, value in pipeline_config.items():
             logger.info(f"  {key}: {value}")
 
-        # Run pipeline
+        # Run pipeline (handles single/multi-gene and merge_output automatically)
         logger.info("\n" + "-" * 70)
         logger.info("Starting pipeline execution...")
         logger.info("-" * 70)
 
-        pipeline = MatchingPipeline(**pipeline_config)
-        results = pipeline.run()
+        results = run_pipeline(
+            gtf_file=args.gtf,
+            fasta_file=args.fasta,
+            gene_name=args.gene,
+            transcript_id=args.transcript,
+            database_dir=args.database,
+            output_dir=args.output_dir,
+            merge_output=args.merge_output,
+            variant_types=[v.strip() for v in args.variant_types.split(',')],
+            protocols=[p.strip() for p in args.protocols.split(',')],
+            operations=[o.strip() for o in args.operations.split(',')],
+            buildver=args.buildver,
+            threads=args.threads,
+            max_indel_length=args.max_indel_length,
+            min_indel_length=args.min_indel_length,
+            synonymous=args.synonymous,
+            include_stop_codon=args.include_stop_codon,
+            max_splice_offset=args.max_splice_offset,
+            min_splice_offset=args.min_splice_offset,
+            include_classic_splice_sites=args.include_classic_splice_sites,
+            max_variants=args.max_variants,
+        )
 
         # Print summary
         logger.info("\n" + "=" * 70)
         logger.info("Pipeline Execution Summary")
         logger.info("=" * 70)
-        logger.info(f"Gene: {args.gene} ({args.transcript})")
-        logger.info(f"Total variants simulated: {results['total_variants']}")
-        logger.info(f"Simulated VCF: {results['simulated_vcf']}")
-        logger.info(f"Annotated TSV: {results['annotated_tsv']}")
-        logger.info(f"Output directory: {args.output}")
 
-        if results['auroc_scores']:
-            logger.info("\nauROC Scores:")
-            for tool, metrics in results['auroc_scores'].items():
-                logger.info(f"  {tool}: {metrics['auroc']:.4f}")
+        # Handle both single-gene and multi-gene result formats
+        if results.get('mode') == 'separate_output' or 'all_gene_results' in results:
+            all_gene_results = results.get('all_gene_results', {})
+            logger.info(f"Mode: multi-gene ({len(all_gene_results)} gene(s))")
+            for gene, gene_res in all_gene_results.items():
+                logger.info(f"\n  Gene: {gene}")
+                logger.info(f"    Total variants: {gene_res.get('total_variants', 'N/A')}")
+                logger.info(f"    Simulated VCF: {gene_res.get('simulated_vcf', 'N/A')}")
+                logger.info(f"    Annotated TSV: {gene_res.get('annotated_tsv', 'N/A')}")
+                if gene_res.get('auroc_scores'):
+                    for tool, metrics in gene_res['auroc_scores'].items():
+                        logger.info(f"    {tool} auROC: {metrics['auroc']:.4f}")
+            if results.get('simulated_vcf'):
+                logger.info(f"\n  Merged VCF: {results['simulated_vcf']}")
+            if results.get('annotated_tsv'):
+                logger.info(f"  Merged annotation: {results['annotated_tsv']}")
+            if results.get('auroc_scores'):
+                logger.info("\n  Merged auROC Scores:")
+                for tool, metrics in results['auroc_scores'].items():
+                    logger.info(f"    {tool}: {metrics['auroc']:.4f}")
+        else:
+            logger.info(f"Gene: {results.get('gene_name', 'N/A')} ({results.get('transcript_id', 'N/A')})")
+            logger.info(f"Total variants simulated: {results.get('total_variants', 'N/A')}")
+            logger.info(f"Simulated VCF: {results.get('simulated_vcf', 'N/A')}")
+            logger.info(f"Annotated TSV: {results.get('annotated_tsv', 'N/A')}")
+            logger.info(f"Output directory: {args.output_dir}")
+
+            if results.get('auroc_scores'):
+                logger.info("\nauROC Scores:")
+                for tool, metrics in results['auroc_scores'].items():
+                    logger.info(f"  {tool}: {metrics['auroc']:.4f}")
 
         logger.info("\nGenerated files:")
-        for file_type, file_path in results['figures'].items():
+        for file_type, file_path in results.get('figures', {}).items():
             logger.info(f"  {file_type}: {file_path}")
 
         logger.info("\n✅ Pipeline completed successfully!")
