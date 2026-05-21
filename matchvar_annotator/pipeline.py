@@ -713,6 +713,41 @@ class MatchingPipeline:
         logger.info(f"Generated {len(diag['figures'])} diagnostic figures")
         return {k: v for k, v in diag.get('figures', {}).items()}
 
+    def _save_summary(self, results: Dict[str, Any]):
+        """Save pipeline summary as JSON"""
+        summary_file = os.path.join(self.output_dir, f"{self.gene_name}_pipeline_summary.json")
+
+        summary = {
+            'gene_name': results['gene_name'],
+            'transcript_id': results['transcript_id'],
+            'timestamp': datetime.now().isoformat(),
+            'total_variants': results['total_variants'],
+            'simulated_vcf': results['simulated_vcf'],
+            'annotated_tsv': results['annotated_tsv'],
+            'auroc_scores': results['auroc_scores'],
+            'figures': {k: v for k, v in results['figures'].items() if k.endswith('_pdf')}
+        }
+
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2)
+
+        logger.info(f"Summary saved: {summary_file}")
+
+        # Also create a TSV statistics table
+        stats_file = os.path.join(self.output_dir, f"{self.gene_name}_auroc_statistics.tsv")
+        if results['auroc_scores']:
+            stats_df = pd.DataFrame([
+                {
+                    'Tool': tool,
+                    'AUROC': metrics['auroc'],
+                    'AUPRC': metrics['auprc'],
+                    'N_Variants': metrics['n_variants']
+                }
+                for tool, metrics in results['auroc_scores'].items()
+            ])
+            stats_df.to_csv(stats_file, sep='\t', index=False)
+            logger.info(f"Statistics table saved: {stats_file}")
+
 # create labels from vcf 
 def _labels_from_vcf_info(vcf_path: str) -> Optional[np.ndarray]:
     """
@@ -766,41 +801,6 @@ def _labels_from_vcf_info(vcf_path: str) -> Optional[np.ndarray]:
     except Exception as exc:
         logger.error(f"Error reading VCF file for labels: {exc}")
         return None
-
-    def _save_summary(self, results: Dict[str, Any]):
-        """Save pipeline summary as JSON"""
-        summary_file = os.path.join(self.output_dir, f"{self.gene_name}_pipeline_summary.json")
-
-        summary = {
-            'gene_name': results['gene_name'],
-            'transcript_id': results['transcript_id'],
-            'timestamp': datetime.now().isoformat(),
-            'total_variants': results['total_variants'],
-            'simulated_vcf': results['simulated_vcf'],
-            'annotated_tsv': results['annotated_tsv'],
-            'auroc_scores': results['auroc_scores'],
-            'figures': {k: v for k, v in results['figures'].items() if k.endswith('_pdf')}
-        }
-
-        with open(summary_file, 'w', encoding='utf-8') as f:
-            json.dump(summary, f, indent=2)
-
-        logger.info(f"Summary saved: {summary_file}")
-
-        # Also create a TSV statistics table
-        stats_file = os.path.join(self.output_dir, f"{self.gene_name}_auroc_statistics.tsv")
-        if results['auroc_scores']:
-            stats_df = pd.DataFrame([
-                {
-                    'Tool': tool,
-                    'AUROC': metrics['auroc'],
-                    'AUPRC': metrics['auprc'],
-                    'N_Variants': metrics['n_variants']
-                }
-                for tool, metrics in results['auroc_scores'].items()
-            ])
-            stats_df.to_csv(stats_file, sep='\t', index=False)
-            logger.info(f"Statistics table saved: {stats_file}")
 
 
 def _run_annotation_for_vcf(
