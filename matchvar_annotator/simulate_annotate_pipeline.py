@@ -282,7 +282,7 @@ Examples:
         logger.info("=" * 70)
 
         # Handle both single-gene and multi-gene result formats
-        if results.get('mode') == 'separate_output' or 'all_gene_results' in results:
+        if results.get('mode') == 'separate_output' or results.get('all_gene_results'):
             all_gene_results = results.get('all_gene_results', {})
             logger.info(f"Mode: multi-gene ({len(all_gene_results)} gene(s))")
             for gene, gene_res in all_gene_results.items():

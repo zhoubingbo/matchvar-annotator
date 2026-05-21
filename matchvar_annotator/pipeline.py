@@ -13,7 +13,6 @@ End-to-end pipeline for variant simulation, annotation, and evaluation:
 import os
 import sys
 import logging
-import tempfile
 import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -237,12 +236,17 @@ class MatchingPipeline:
         logger.info("\n[STEP 4/4] Visualization")
         figures = self._generate_visualizations(scores)
 
+        # Calculate total variants correctly (sum of all variant lists, not dict length)
+        total_variants = 0
+        if self.variants:
+            total_variants = sum(len(v) for v in self.variants.values() if isinstance(v, list))
+        
         results = {
             'gene_name': self.gene_name,
             'transcript_id': self.transcript_id,
             'simulated_vcf': self.simulated_vcf,
             'annotated_tsv': self.annotated_tsv,
-            'total_variants': len(self.variants) if self.variants else 0,
+            'total_variants': total_variants,
             'auroc_scores': scores,
             'figures': figures,
             'output_dir': self.output_dir
@@ -977,11 +981,16 @@ def run_pipeline(gtf_file: str, fasta_file: str, gene_name: str, transcript_id: 
         )
         scores = _calculate_auroc_scores_from_tsv(merged_annotated_tsv, merged_vcf)
         figs = _generate_visualizations_for_scores(scores, output_dir, "merged_genes")
+        # Calculate total variants from all gene results
+        total_variants = sum(
+            r.get('total_variants', 0) for r in all_results.values()
+        )
         merged_main_result = {
             "gene_name": "merged_genes",
             "transcript_id": "merged_transcripts",
             "simulated_vcf": merged_vcf,
             "annotated_tsv": merged_annotated_tsv,
+            "total_variants": total_variants,
             "auroc_scores": scores,
             "figures": figs,
             "all_gene_results": all_results
