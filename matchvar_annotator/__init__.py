@@ -11,6 +11,7 @@ Main Features:
 - Format Conversion
 - Coding Change Analysis
 - Table Annotation
+- ClinVar-based ROC Evaluation
 """
 
 __version__ = "1.2.0"
@@ -27,9 +28,18 @@ from .database_manager import DatabaseManager
 
 # Import new modules
 from .variant_simulation import GeneTranscript, ExonExtractor
-from .pipeline import MatchingPipeline, run_pipeline, run_pipeline_from_args, simulate_variants
+from .pipeline import (
+    MatchingPipeline,
+    run_pipeline,
+    run_pipeline_from_args,
+    simulate_variants,
+    run_clinvar_roc_evaluation,
+)
 from .metrics import VariantMetricCalculator, calculate_auroc_from_dataframe
 from .visualization import PerformanceVisualizer, create_summary_figure
+
+# Import evaluation module
+from .evaluation import ClinVarProcessor, ROCAnalyzer, PublicationPlotGenerator
 
 # Import database indexing functionality
 try:
@@ -70,10 +80,16 @@ __all__ = [
     'ExonExtractor',
     'MatchingPipeline',
     'run_pipeline',
+    'run_clinvar_roc_evaluation',
     'VariantMetricCalculator',
     'calculate_auroc_from_dataframe',
     'PerformanceVisualizer',
     'create_summary_figure',
+
+    # Evaluation module
+    'ClinVarProcessor',
+    'ROCAnalyzer',
+    'PublicationPlotGenerator',
 
     # Indexing functions
     'build_index_for_file',

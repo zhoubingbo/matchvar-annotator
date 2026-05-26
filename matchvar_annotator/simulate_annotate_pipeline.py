@@ -36,7 +36,7 @@ import logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from matchvar_annotator import __version__
-from matchvar_annotator.pipeline import MatchingPipeline, run_pipeline
+from matchvar_annotator.pipeline import MatchingPipeline, run_pipeline, run_clinvar_roc_evaluation
 
 logger = logging.getLogger(__name__)
 
@@ -104,28 +104,30 @@ Examples:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    # ── Required arguments ───────────────────────────────────────────────────
+# ── Required arguments ───────────────────────────────────────────────────
     required = parser.add_argument_group('Required Arguments')
     required.add_argument('--gtf', required=True,
-                         help='Path to GTF annotation file (can be gzipped)')
+                          help='Path to GTF annotation file (can be gzipped)')
     required.add_argument('--fasta', required=True,
-                         help='Path to reference genome FASTA file')
+                          help='Path to reference genome FASTA file')
     required.add_argument('--gene', required=True,
-                         help='Single gene symbol or comma-separated gene symbols '
-                              '(e.g., BRCA1 or BRCA1,TP53)')
+                          help='Single gene symbol or comma-separated gene symbols '
+                               '(e.g., BRCA1 or BRCA1,TP53)')
     required.add_argument('--transcript', required=True,
-                         help='Single transcript or comma-separated transcripts, '
-                              'one-to-one with --gene '
-                              '(e.g., NM_007294 or NM_007294,NM_000546)')
+                          help='Single transcript or comma-separated transcripts, '
+                               'one-to-one with --gene '
+                               '(e.g., NM_007294 or NM_007294,NM_000546)')
     required.add_argument('--database', required=True,
-                         help='Path to annotation database directory (humandb)')
+                          help='Path to annotation database directory (humandb)')
     required.add_argument('--output_dir', required=True,
-                         help='Output directory for all results')
+                          help='Output directory for all results')
     required.add_argument('--merge_output', nargs='?', const=True, default=False,
                           type=_parse_bool,
                           help="True = merge all genes into one VCF/annotation; "
                                "False = each gene separate (default). "
                                "Usage: --merge_output or --merge_output TRUE/FALSE")
+    required.add_argument('--clinvar',
+                          help='Path to ClinVar CSV for ROC evaluation (optional)')
 
     # ── Optional arguments ───────────────────────────────────────────────────
     optional = parser.add_argument_group('Optional Arguments')
@@ -163,6 +165,20 @@ Examples:
                           help='Skip generating figures (faster run)')
     optional.add_argument('--keep-temp', action='store_true',
                           help='Keep temporary files for debugging')
+    optional.add_argument('--simulation-strategy', default='traditional',
+                          choices=['traditional', 'spectrum', 'hybrid'],
+                                   help='Variant simulation strategy (default: traditional)')
+    optional.add_argument('--min-probability', type=float, default=0.001,
+                                   help='Min mutation probability for spectrum simulation (default: 0.001)')
+    optional.add_argument('--constraint-filter', action='store_true', default=False,
+                                   help='Use gnomAD constraint filtering for spectrum simulation')
+    optional.add_argument('--spectrum-ratio', type=float, default=0.7,
+                                   help='Ratio of spectrum vs traditional variants (default: 0.7)')
+    optional.add_argument('--score-correction-method', default='none',
+                                   choices=['none', 'logistic_regression', 'kmeans', 'isolation_forest'],
+                                   help='ClinVar-based score correction method (default: none)')
+    optional.add_argument('--score-correction-clusters', type=int, default=3,
+                                   help='Number of clusters for K-means correction (default: 3)')
 
     # ── Logging options ──────────────────────────────────────────────────────
     logging_group = parser.add_argument_group('Logging Options')
@@ -233,29 +249,8 @@ Examples:
         logger.info(f" MATCHVAR Pipeline v{__version__}")
         logger.info("=" * 70)
 
-        # Log configuration summary
-        logger.info("Pipeline configuration:")
-        logger.info(f" GTF file:    {args.gtf}")
-        logger.info(f" FASTA file:  {args.fasta}")
-        logger.info(f" Gene:        {args.gene}")
-        logger.info(f" Transcript:  {args.transcript}")
-        logger.info(f" Database:    {args.database}")
-        logger.info(f" Output dir:  {args.output_dir}")
-        logger.info(f" Variant types: {args.variant_types}")
-        logger.info(f" Protocols:   {args.protocols}")
-        logger.info(f" Operations:  {args.operations}")
-        logger.info(f" Buildver:    {args.buildver}")
-        logger.info(f" Threads:     {args.threads}")
-        logger.info(f" Max indel:   {args.max_indel_length}")
-        logger.info(f" Min indel:   {args.min_indel_length}")
-        logger.info(f" Max splice:  {args.max_splice_offset}")
-        logger.info(f" Min splice:  {args.min_splice_offset}")
-        logger.info(f" Merge output: {args.merge_output}")
-
-        logger.info("=" * 70)
-        logger.info(" Starting pipeline execution...")
-        logger.info("=" * 70)
-
+        # Run main pipeline
+        logger.info(" Running variant simulation and annotation...")
         results = run_pipeline(
             gtf_file=args.gtf,
             fasta_file=args.fasta,
@@ -277,7 +272,37 @@ Examples:
             min_splice_offset=args.min_splice_offset,
             include_classic_splice_sites=args.include_classic_splice_sites,
             max_variants=args.max_variants,
+            simulation_strategy=args.simulation_strategy,
+            min_probability=args.min_probability,
+            constraint_filter=args.constraint_filter,
+            spectrum_ratio=args.spectrum_ratio,
+            score_correction_method=args.score_correction_method,
+            score_correction_clusters=args.score_correction_clusters,
         )
+
+        # Run ClinVar ROC evaluation if --clinvar provided
+        if args.clinvar and args.clinvar != 'skip':
+            logger.info("=" * 70)
+            logger.info(" Running ClinVar ROC evaluation...")
+            logger.info("=" * 70)
+
+            # Determine annotated TSV path
+            annotated_tsv = results.get('annotated_tsv')
+            if annotated_tsv and os.path.exists(annotated_tsv):
+                vcf_path = results.get('simulated_vcf')
+                eval_results = run_clinvar_roc_evaluation(
+                    annotated_tsv=annotated_tsv,
+                    clinvar_csv=args.clinvar,
+                    gene_name=args.gene.split(',')[0],  # First gene
+                    output_dir=args.output_dir,
+                    vcf_path=vcf_path,
+                )
+                results['clinvar_evaluation'] = eval_results
+                if 'figures' in eval_results:
+                    results.setdefault('figures', {}).update(eval_results['figures'])
+                logger.info(f" ClinVar ROC completed: {eval_results.get('total_matches', 0)} matches")
+            else:
+                logger.warning(" Annotated TSV not found, skipping ClinVar ROC evaluation")
 
         # ── Summary ───────────────────────────────────────────────────────────
         logger.info("=" * 70)

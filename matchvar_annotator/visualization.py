@@ -449,7 +449,7 @@ class FigureStyle:
     legend_fontsize   : int  = 10
 
     colormap_roc      : str  = 'tab10'
-    colormap_bar      : str  = 'Blues_d'
+    colormap_bar      : str  = 'Blues'
     grid_alpha        : float = 0.3
 
 

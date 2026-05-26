@@ -537,7 +537,13 @@ class MatchingPipeline:
                  max_splice_offset: int = 20,
                  min_splice_offset: int = 1,
                  include_classic_splice_sites: bool = True,
-                 max_variants: Optional[int] = None):
+                 max_variants: Optional[int] = None,
+                 simulation_strategy: str = 'traditional',
+                 min_probability: float = 0.001,
+                 constraint_filter: bool = False,
+                 spectrum_ratio: float = 0.7,
+                 score_correction_method: str = 'none',
+                 score_correction_clusters: int = 3):
         """
         Initialize the matching pipeline.
 
@@ -561,6 +567,12 @@ class MatchingPipeline:
             min_splice_offset: Min intron offset for splice-site variants (default: 1).
             include_classic_splice_sites: Include +/-1, +/-2 splice sites (default: True).
             max_variants: Maximum total simulated variants, None=unlimited.
+            simulation_strategy: Variant simulation strategy ('traditional', 'spectrum', 'hybrid').
+            min_probability: Min mutation probability for spectrum simulation.
+            constraint_filter: Use gnomAD constraint filtering.
+            spectrum_ratio: Ratio of spectrum vs traditional variants for hybrid mode.
+            score_correction_method: ClinVar-based score correction method.
+            score_correction_clusters: Number of clusters for K-means correction.
         """
         self.gtf_file          = self._validate_file(gtf_file, "GTF")
         self.fasta_file        = self._validate_file(fasta_file, "FASTA")
@@ -582,6 +594,12 @@ class MatchingPipeline:
         self.min_splice_offset           = min_splice_offset
         self.include_classic_splice_sites = include_classic_splice_sites
         self.max_variants                = max_variants
+        self.simulation_strategy         = simulation_strategy
+        self.min_probability             = min_probability
+        self.constraint_filter           = constraint_filter
+        self.spectrum_ratio              = spectrum_ratio
+        self.score_correction_method     = score_correction_method
+        self.score_correction_clusters   = score_correction_clusters
 
         self.transcript:    Optional[GeneTranscript] = None
         self.variants:      Optional[Dict]           = None
@@ -667,6 +685,20 @@ class MatchingPipeline:
         """Run variant simulation and write the simulated VCF."""
         self.simulated_vcf = os.path.join(self.output_dir, f"{self.gene_name}_simulated.vcf")
 
+        # Use enhanced simulation for spectrum/hybrid strategies
+        if self.simulation_strategy == 'spectrum':
+            self._run_simulation_spectrum()
+        elif self.simulation_strategy == 'hybrid':
+            self._run_simulation_hybrid()
+        else:
+            self._run_simulation_traditional()
+
+        variant_lists = {k: v for k, v in self.variants.items() if k != 'total'}
+        total = sum(len(v) for v in variant_lists.values()) if isinstance(variant_lists, dict) else 0
+        logger.info(f" Generated {total} variants")
+
+    def _run_simulation_traditional(self) -> None:
+        """Traditional variant simulation."""
         self.transcript, variants_dict = simulate_variants(
             gtf_file=self.gtf_file,
             fasta_file=self.fasta_file,
@@ -683,11 +715,114 @@ class MatchingPipeline:
             include_classic_splice_sites=self.include_classic_splice_sites,
             max_variants=self.max_variants,
         )
-
         self.variants = variants_dict
-        variant_lists = {k: v for k, v in variants_dict.items() if k != 'total'}
-        total = sum(len(v) for v in variant_lists.values()) if isinstance(variant_lists, dict) else 0
-        logger.info(f" Generated {total} variants")
+
+    def _run_simulation_spectrum(self) -> None:
+        """Spectrum-aware variant simulation using utils."""
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from variant_simulation import ExonExtractor
+        from utils.enhanced_data_simulation import EnhancedGeneTranscript
+        
+        try:
+            extractor = ExonExtractor(self.gtf_file, self.fasta_file)
+            exons, chromosome, strand = extractor.extract_exons(self.gene_name, self.transcript_id)
+            
+            # Convert exons format to match GeneTranscript expectations
+            formatted_exons = []
+            for exon in exons:
+                formatted_exons.append({
+                    'genomic_start': exon['genomic_start'],
+                    'genomic_end': exon['genomic_end'],
+                    'cds_sequence': exon['cds_sequence'],
+                })
+            
+            enhanced_tx = EnhancedGeneTranscript(
+                gene_name=self.gene_name,
+                transcript_id=self.transcript_id,
+                exons=formatted_exons,
+                chromosome=chromosome,
+                strand=strand,
+                genome=extractor.genome,
+                fasta_file=self.fasta_file,
+            )
+            
+            variants_result = enhanced_tx.generate_spectrum_aware_variants(
+                max_variants=self.max_variants,
+                min_probability=self.min_probability,
+                use_constraint_filter=self.constraint_filter,
+            )
+            variants_list = variants_result.get('variants', [])
+            
+            # If no variants generated, fallback to traditional
+            if not variants_list:
+                raise ValueError("No spectrum variants generated")
+                
+            # Convert list format to dict format expected by export_to_vcf
+            variants_dict = {'snvs': [v for v in variants_list if v.get('type') == 'SNV'],
+                            'insertions': [v for v in variants_list if v.get('type') == 'insertion'],
+                            'deletions': [v for v in variants_list if v.get('type') == 'deletion'],
+                            'splice_sites': [v for v in variants_list if v.get('type') == 'splice_site']}
+            self.variants = variants_dict
+            enhanced_tx.export_to_vcf(variants_dict, self.simulated_vcf)
+            self.transcript = enhanced_tx
+            
+        except Exception as e:
+            logger.warning(f"Spectrum simulation failed, falling back to traditional: {e}")
+            self._run_simulation_traditional()
+
+    def _run_simulation_hybrid(self) -> None:
+        """Hybrid variant simulation using utils."""
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from variant_simulation import ExonExtractor
+        from utils.enhanced_data_simulation import EnhancedGeneTranscript
+        
+        try:
+            extractor = ExonExtractor(self.gtf_file, self.fasta_file)
+            exons, chromosome, strand = extractor.extract_exons(self.gene_name, self.transcript_id)
+            
+            # Convert exons format to match GeneTranscript expectations
+            formatted_exons = []
+            for exon in exons:
+                formatted_exons.append({
+                    'genomic_start': exon['genomic_start'],
+                    'genomic_end': exon['genomic_end'],
+                    'cds_sequence': exon['cds_sequence'],
+                })
+            
+            enhanced_tx = EnhancedGeneTranscript(
+                gene_name=self.gene_name,
+                transcript_id=self.transcript_id,
+                exons=formatted_exons,
+                chromosome=chromosome,
+                strand=strand,
+                genome=extractor.genome,
+                fasta_file=self.fasta_file,
+            )
+            
+            variants_result = enhanced_tx.generate_hybrid_variants(
+                spectrum_ratio=self.spectrum_ratio,
+                max_variants=self.max_variants,
+                min_probability=self.min_probability,
+                use_constraint_filter=self.constraint_filter,
+            )
+            variants_list = variants_result.get('all_variants', [])
+            
+            if not variants_list:
+                raise ValueError("No hybrid variants generated")
+                
+            variants_dict = {'snvs': [v for v in variants_list if v.get('type') == 'SNV'],
+                            'insertions': [v for v in variants_list if v.get('type') == 'insertion'],
+                            'deletions': [v for v in variants_list if v.get('type') == 'deletion'],
+                            'splice_sites': [v for v in variants_list if v.get('type') == 'splice_site']}
+            self.variants = variants_dict
+            enhanced_tx.export_to_vcf(variants_dict, self.simulated_vcf)
+            self.transcript = enhanced_tx
+            
+        except Exception as e:
+            logger.warning(f"Hybrid simulation failed, falling back to traditional: {e}")
+            self._run_simulation_traditional()
 
     def _run_annotation(self) -> None:
         """Run table annotation on the simulated VCF."""
@@ -765,8 +900,14 @@ class MatchingPipeline:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_pipeline(gtf_file: str, fasta_file: str, gene_name: str, transcript_id: str,
-                 database_dir: str, output_dir: str, merge_output: bool = False,
-                 **kwargs) -> Dict[str, Any]:
+                  database_dir: str, output_dir: str, merge_output: bool = False,
+                  simulation_strategy: str = 'traditional',
+                  min_probability: float = 0.001,
+                  constraint_filter: bool = False,
+                  spectrum_ratio: float = 0.7,
+                  score_correction_method: str = 'none',
+                  score_correction_clusters: int = 3,
+                  **kwargs) -> Dict[str, Any]:
     """
     Run pipeline directly from Python code.
 
@@ -779,6 +920,12 @@ def run_pipeline(gtf_file: str, fasta_file: str, gene_name: str, transcript_id: 
         output_dir:    Output directory.
         merge_output:  If True, merge all genes into one VCF/annotation output;
                        False = separate files per gene (default).
+        simulation_strategy: Variant simulation strategy.
+        min_probability: Min mutation probability for spectrum simulation.
+        constraint_filter: Use gnomAD constraint filtering.
+        spectrum_ratio: Ratio of spectrum vs traditional variants.
+        score_correction_method: ClinVar-based score correction method.
+        score_correction_clusters: Number of clusters for K-means correction.
         **kwargs:      Additional keyword arguments forwarded to MatchingPipeline.
 
     Returns:
@@ -800,6 +947,12 @@ def run_pipeline(gtf_file: str, fasta_file: str, gene_name: str, transcript_id: 
             transcript_id=tx_list[0],
             database_dir=database_dir,
             output_dir=output_dir,
+            simulation_strategy=simulation_strategy,
+            min_probability=min_probability,
+            constraint_filter=constraint_filter,
+            spectrum_ratio=spectrum_ratio,
+            score_correction_method=score_correction_method,
+            score_correction_clusters=score_correction_clusters,
             **kwargs,
         )
         return pipeline.run()
@@ -821,6 +974,12 @@ def run_pipeline(gtf_file: str, fasta_file: str, gene_name: str, transcript_id: 
             transcript_id=tx,
             database_dir=database_dir,
             output_dir=gene_out,
+            simulation_strategy=simulation_strategy,
+            min_probability=min_probability,
+            constraint_filter=constraint_filter,
+            spectrum_ratio=spectrum_ratio,
+            score_correction_method=score_correction_method,
+            score_correction_clusters=score_correction_clusters,
             **kwargs,
         )
 
@@ -903,4 +1062,91 @@ def run_pipeline_from_args(args: argparse.Namespace) -> Dict[str, Any]:
         min_splice_offset=args.min_splice_offset,
         include_classic_splice_sites=args.include_classic_splice_sites,
         max_variants=args.max_variants,
+        simulation_strategy=getattr(args, 'simulation_strategy', 'traditional'),
+        min_probability=getattr(args, 'min_probability', 0.001),
+        constraint_filter=getattr(args, 'constraint_filter', False),
+        spectrum_ratio=getattr(args, 'spectrum_ratio', 0.7),
+        score_correction_method=getattr(args, 'score_correction_method', 'none'),
+        score_correction_clusters=getattr(args, 'score_correction_clusters', 3),
     )
+
+
+def run_clinvar_roc_evaluation(
+    annotated_tsv: str,
+    clinvar_csv: str,
+    gene_name: str,
+    output_dir: str,
+    vcf_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Run ClinVar-based ROC evaluation comparing Total_Score vs AlphaMissense.
+
+    This is the main evaluation function for the matchvar-pipeline CLI command.
+    It loads ClinVar data, extracts benign/pathogenic labels, matches against
+    annotated variants, and produces ROC curves with comparison metrics.
+
+    Args:
+        annotated_tsv: Path to annotated multianno TSV file
+        clinvar_csv: Path to ClinVar CSV with GeneSymbol, ClinicalSignificance, etc.
+        gene_name: Target gene name for filtering ClinVar data
+        output_dir: Directory for output figures and results
+        vcf_path: Optional path to companion VCF for extracting Total_Score
+
+    Returns:
+        Dictionary with ROC analysis results and figure paths
+    """
+    from .evaluation import ClinVarProcessor, ROCAnalyzer, PublicationPlotGenerator
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    fig_dir = Path(output_dir) / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load ClinVar data and extract binary labels
+    clinvar = ClinVarProcessor(clinvar_csv)
+    clinvar.load_data()
+    gene_data = clinvar.filter_by_gene(gene_name)
+
+    # Read annotated TSV
+    df = pd.read_csv(annotated_tsv, sep='\t', low_memory=False)
+
+    # Merge Total_Score from VCF if needed and available
+    if vcf_path and 'Total_Score' not in df.columns:
+        from .visualization import merge_vcf_scores_into_tsv
+        df = merge_vcf_scores_into_tsv(annotated_tsv, vcf_path)
+
+    # Find matches between annotated variants and ClinVar
+    matches = clinvar.find_matches(df, gene_data)
+
+    if not matches:
+        logger.warning(f"No ClinVar matches found for gene {gene_name}")
+        return {"error": "No matches found", "gene_name": gene_name}
+
+    logger.info(f"Found {len(matches)} ClinVar matches for {gene_name}")
+
+    # Build comparison result for ROCAnalyzer
+    comparison_result = {
+        "matches": matches,
+        "total_matches": len(matches),
+        "total_simulated": len(df),
+    }
+
+    # Run ROC analysis
+    roc_analyzer = ROCAnalyzer(output_dir=output_dir)
+    roc_result = roc_analyzer.perform_roc_analysis(
+        comparison_result, gene_name, save_results=True
+    )
+
+    # Generate plots
+    plot_generator = PublicationPlotGenerator(output_dir=output_dir)
+    analysis_result = {"basic_statistics": {"total_variants": len(df)}}
+    plots = plot_generator.create_comprehensive_analysis_plot(
+        analysis_result, comparison_result, roc_result, gene_name
+    )
+
+    return {
+        "gene_name": gene_name,
+        "total_matches": len(matches),
+        "roc_result": roc_result,
+        "figures": plots,
+        "comparison_result": comparison_result,
+    }

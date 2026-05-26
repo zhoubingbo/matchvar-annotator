@@ -134,7 +134,7 @@ class MatchvarRunner:
             'description': 'ClinVar clinical variant database',
             'category': 'database'
         },
-        'cosmic70': {
+        'cosmic102': {
             'operation': 'f',
             'description': 'COSMIC cancer variant database',
             'category': 'database'
