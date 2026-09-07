@@ -94,11 +94,14 @@ class ClinVarProcessor:
         return filtered, labels
     
     def get_position_key(self, row: pd.Series) -> str:
-        """Create unique position key for matching."""
-        chr_val = str(row.get('Chr', row.get('Chromosome', '')))
-        pos = row.get('Start', row.get('Position', ''))
-        ref = str(row.get('ref', row.get('ReferenceAlleleVCF', '')))
-        alt = str(row.get('alt', row.get('AlternateAlleleVCF', '')))
+        """Create unique position key for matching (chr stripped, Ref/Alt aliases)."""
+        chr_val = str(row.get('Chr', row.get('Chromosome', row.get('chromosome', ''))))
+        chr_val = chr_val.replace('chr', '').replace('Chr', '')
+        if chr_val.upper() == 'MT':
+            chr_val = 'M'
+        pos = row.get('Start', row.get('Position', row.get('genomic_pos', '')))
+        ref = str(row.get('Ref', row.get('ref', row.get('ReferenceAlleleVCF', row.get('original', '')))))
+        alt = str(row.get('Alt', row.get('alt', row.get('AlternateAlleleVCF', row.get('mutant', '')))))
         return f"{chr_val}:{pos}:{ref}>{alt}"
     
     def find_matches(
@@ -107,31 +110,17 @@ class ClinVarProcessor:
         clinvar_df: pd.DataFrame
     ) -> List[Dict[str, Any]]:
         """
-        Find matching positions between annotated VCF and ClinVar.
-        
-        Args:
-            annotated_df: DataFrame with genomic variants (Start, ref, alt columns)
-            clinvar_df: ClinVar DataFrame
-            
-        Returns:
-            List of match dictionaries with labels and scores
+        Find matching positions between annotated variants and ClinVar.
         """
         matches = []
         
-        # Build position lookup from ClinVar
         clinvar_pos_map: Dict[str, pd.Series] = {}
         for _, row in clinvar_df.iterrows():
             key = self.get_position_key(row)
             clinvar_pos_map[key] = row
         
         for _, var in annotated_df.iterrows():
-            # Build key from annotated variant
-            chr_val = str(var.get('Chr', var.get('chromosome', '')))
-            pos = var.get('Start', var.get('genomic_pos', ''))
-            ref = str(var.get('ref', var.get('original', '')))
-            alt = str(var.get('alt', var.get('mutant', '')))
-            
-            key = f"{chr_val}:{pos}:{ref}>{alt}"
+            key = self.get_position_key(var)
             
             if key in clinvar_pos_map:
                 clinvar_row = clinvar_pos_map[key]
@@ -142,12 +131,12 @@ class ClinVarProcessor:
                 elif sig in self.PATHOGENIC_TERMS:
                     label = 1
                 else:
-                    continue  # Skip uncertain
+                    continue
                 
                 matches.append({
-                    'position': pos,
-                    'ref': ref,
-                    'alt': alt,
+                    'position': var.get('Start', var.get('genomic_pos', '')),
+                    'ref': var.get('Ref', var.get('ref', '')),
+                    'alt': var.get('Alt', var.get('alt', '')),
                     'label': label,
                     'clinical_significance': sig,
                     'total_score': var.get('Total_Score', var.get('total_score', 0.0)),

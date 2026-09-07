@@ -9,6 +9,7 @@ in Python code.
 
 import sys
 import os
+import pandas as pd
 
 # Add package to path if running from source
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -119,7 +120,6 @@ def example_step_by_step():
         buildver='hg38',
         protocol='refGene,dbnsfp42a',
         operation='g,f',
-        vcfinput=True,
         otherinfo=True
     )
     annotator.run_annotation()

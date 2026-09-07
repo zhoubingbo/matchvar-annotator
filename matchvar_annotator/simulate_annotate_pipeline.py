@@ -278,6 +278,8 @@ Examples:
             spectrum_ratio=args.spectrum_ratio,
             score_correction_method=args.score_correction_method,
             score_correction_clusters=args.score_correction_clusters,
+            enable_visualization=not args.no_visualization,
+            keep_temp=args.keep_temp,
         )
 
         # Run ClinVar ROC evaluation if --clinvar provided

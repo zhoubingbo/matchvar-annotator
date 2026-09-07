@@ -99,6 +99,12 @@ Example usage:
     )
     
     parser.add_argument(
+        '--convert-vcf',
+        action='store_true',
+        help='Convert VCF to .mvinput via convert2matchvar, then annotate (legacy path). Default is native VCF CHROM/POS/REF/ALT.'
+    )
+    
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Verbose output'
@@ -107,7 +113,7 @@ Example usage:
     parser.add_argument(
         '--version',
         action='version',
-        version='%(prog)s 1.1.2'
+        version='%(prog)s 1.2.0'
     )
     
     args = parser.parse_args()
@@ -139,9 +145,11 @@ Example usage:
         )
         
         # Prepare additional arguments
-        additional_args = {}
+        additional_args = {'operations': operations}
         if args.use_mane_transcript:
             additional_args['use_mane_transcript'] = True
+        if args.convert_vcf:
+            additional_args['convert_vcf'] = True
         
         logger.info(f"Starting annotation of file: {args.input_file}")
         logger.info(f"Using protocols: {protocols}")
@@ -149,9 +157,8 @@ Example usage:
         logger.info(f"Genome version: {args.genome_version}")
         logger.info(f"Number of threads: {args.threads}")
         
-        # Run annotation
         result_df = runner.run_matchvar(
-            input_file=os.path.basename(args.input_file),
+            input_file=os.path.abspath(args.input_file),
             protocols=protocols,
             buildver=args.genome_version,
             output_prefix=args.output,

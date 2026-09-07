@@ -22,6 +22,8 @@ from sklearn.metrics import (
 )
 import logging
 
+from .labeling import FUNC_LABEL_COLUMNS, PATHOGENIC_TYPES, func_is_pathogenic
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,26 +139,18 @@ class VariantMetricCalculator:
             logger.info(f"Using labels from column: {label_column}")
             return labels
 
-        candidate_columns = [
-            'Func.refGene', 'ExonicFunc.refGene', 'TYPE',
-            'Func.ensGene', 'ExonicFunc.ensGene',
-            'Func.knownGene', 'ExonicFunc.knownGene'
-        ]
+        candidate_columns = list(FUNC_LABEL_COLUMNS) + ['TYPE']
 
         for col in candidate_columns:
             if col in annotation_df.columns:
                 logger.info(f"Auto-detected label column: {col}")
-                values = annotation_df[col].fillna('').astype(str).str.lower()
-
-                pathogenic_patterns = [
-                    'splicing', 'stopgain', 'stoploss', 'frameshift',
-                    'nonsynonymous', 'missense', 'nonframeshift'
-                ]
-
-                labels = np.array([
-                    1 if any(pat in val for pat in pathogenic_patterns) else 0
-                    for val in values
-                ])
+                if col == 'TYPE':
+                    labels = annotation_df[col].fillna('').astype(str).str.upper().isin(
+                        list(PATHOGENIC_TYPES)
+                    ).astype(int).values
+                else:
+                    values = annotation_df[col].fillna('').astype(str)
+                    labels = values.map(func_is_pathogenic).astype(int).values
 
                 logger.info(f"Extracted {labels.sum()} pathogenic / {len(labels)-labels.sum()} benign labels")
                 return labels

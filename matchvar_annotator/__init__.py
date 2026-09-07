@@ -25,9 +25,13 @@ from .table_matchvar import TableAnnotator
 from .convert2matchvar import Convert2Matchvar
 from .coding_change import CodingChange
 from .database_manager import DatabaseManager
+from .column_names import format_g_hgvs, gene_column_names, parse_g_hgvs
+from .ghgvs import annotate_g_hgvs, ghgvs_to_mvinput_lines
+from .variant_typing import classify_row
 
 # Import new modules
 from .variant_simulation import GeneTranscript, ExonExtractor
+from .enhanced_data_simulation import EnhancedGeneTranscript
 from .pipeline import (
     MatchingPipeline,
     run_pipeline,
@@ -76,6 +80,7 @@ __all__ = [
 
     # New modules
     'GeneTranscript',
+    'EnhancedGeneTranscript',
     'simulate_variants',
     'ExonExtractor',
     'MatchingPipeline',
@@ -85,6 +90,11 @@ __all__ = [
     'calculate_auroc_from_dataframe',
     'PerformanceVisualizer',
     'create_summary_figure',
+    'format_g_hgvs',
+    'parse_g_hgvs',
+    'classify_row',
+    'annotate_g_hgvs',
+    'ghgvs_to_mvinput_lines',
 
     # Evaluation module
     'ClinVarProcessor',

@@ -20,19 +20,61 @@ def _detect_python_executable() -> str:
     if env_py and os.path.exists(env_py):
         return env_py
 
-    # 2) Local .venv
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    venv_unix = os.path.join(project_root, '.venv', 'bin', 'python')
-    venv_win = os.path.join(project_root, '.venv', 'Scripts', 'python.exe')
-    if os.name == 'nt' and os.path.exists(venv_win):
-        return venv_win
-    if os.path.exists(venv_unix):
-        return venv_unix
+    # 2) Local .venv (package parent, then cwd)
+    pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    for project_root in (pkg_root, os.getcwd()):
+        venv_unix = os.path.join(project_root, '.venv', 'bin', 'python')
+        venv_win = os.path.join(project_root, '.venv', 'Scripts', 'python.exe')
+        if os.name == 'nt' and os.path.exists(venv_win):
+            return venv_win
+        if os.path.exists(venv_unix):
+            return venv_unix
 
     # 3) Fallback to current interpreter
     return sys.executable
 
 PYTHON_EXECUTABLE = _detect_python_executable()
+
+
+def _repair_shifted_multianno_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Fix TSV rows that lost the Chr column and shifted left by one."""
+    import re
+
+    if df is None or df.empty or 'Chr' not in df.columns:
+        return df
+
+    cols = list(df.columns)
+    repaired_rows = []
+    n_repaired = 0
+
+    for _, row in df.iterrows():
+        values = ['' if pd.isna(v) else str(v) for v in row.tolist()]
+        chr_val = values[0] if values else ''
+        end_val = values[2] if len(values) > 2 else ''
+        alt_val = values[4] if len(values) > 4 else ''
+
+        looks_shifted = (
+            bool(re.fullmatch(r'\d+', chr_val or ''))
+            and bool(re.fullmatch(r'[ACGTNacgtn]+', end_val or ''))
+            and (('g.' in (alt_val or '')) or str(alt_val).startswith('chr'))
+        )
+
+        if looks_shifted:
+            chrom_match = re.match(r'(chr)?([0-9XYMTxy]+)', alt_val or '')
+            chrom = f"chr{chrom_match.group(2)}" if chrom_match else 'chr?'
+            values = [chrom] + values
+            if len(values) > len(cols):
+                values = values[:len(cols)]
+            elif len(values) < len(cols):
+                values.extend([''] * (len(cols) - len(values)))
+            n_repaired += 1
+
+        repaired_rows.append(values)
+
+    if n_repaired:
+        print(f"已自动修复 {n_repaired} 行列错位的 MATCHVAR 结果")
+        return pd.DataFrame(repaired_rows, columns=cols)
+    return df
 
 def get_system_encoding():
     """Get the system encoding, ensuring cross-platform compatibility"""
@@ -102,6 +144,16 @@ class MatchvarRunner:
             'description': 'UCSC known gene annotation', 
             'category': 'gene_info'
         },
+        'ncbiRefSeq': {
+            'operation': 'g',
+            'description': 'NCBI RefSeq gene models (ncbiRefSeq.bb or genePred)',
+            'category': 'gene_info'
+        },
+        'gencode': {
+            'operation': 'g',
+            'description': 'GENCODE gene models (gencode*.bb or ensGene)',
+            'category': 'gene_info'
+        },
         
         # 频率数据库
         'exac03': {
@@ -165,26 +217,39 @@ class MatchvarRunner:
             'operation': 'f',
             'description': 'AlphaMissense pathogenicity prediction',
             'category': 'prediction'
+        },
+        'dbscsnv11': {
+            'operation': 'f',
+            'description': 'dbscSNV splice-site prediction',
+            'category': 'prediction'
         }
     }
+
+    DEFAULT_PROTOCOLS = [
+        'refGene', 'ensGene', 'knownGene', 'cytoBand', 'exac03', 'avsift',
+        'dbnsfp42a', 'gnomad211_genome', 'esp6500siv2_all',
+        'revel', 'cadd13gt10', 'AlphaMissense',
+    ]
 
     def __init__(self, resources_dir: str = None, input_files_dir: str = None, genome_version: str = 'hg19', thread_count: int = 4):
         """Initialize MATCHVAR runner with custom resources directory and genome version support"""
         if resources_dir:
             self.resources_dir = resources_dir
         else:
-            # 获取项目根目录
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            project_root = os.path.dirname(os.path.dirname(current_dir))  # 从utils/matchvar回到项目根目录
-            self.resources_dir = os.path.join(project_root, 'resources')
+            env_dir = os.environ.get('MATCHVAR_RESOURCES_DIR')
+            pkg_dir = os.path.dirname(os.path.abspath(__file__))
+            candidates = []
+            if env_dir:
+                candidates.append(env_dir)
+            candidates.append(os.path.join(os.path.dirname(pkg_dir), 'resources'))
+            candidates.append(os.path.join(os.getcwd(), 'resources'))
+            self.resources_dir = next((p for p in candidates if os.path.isdir(p)), candidates[0])
         
         self.path_humandb = os.path.join(self.resources_dir, 'humandb')
         
-        # 使用传入的输入文件目录，如果没有传入则使用默认值
         self.input_files = input_files_dir or os.path.join(self.resources_dir, 'input_files')
         
-        # MATCHVAR文件在utils/matchvar目录中，不在resources目录中
-        self.matchvar_path = os.path.dirname(__file__)  # 当前文件就在utils/matchvar目录中
+        self.matchvar_path = os.path.dirname(__file__)
         self.python_table_matchvar = os.path.join(self.matchvar_path, 'table_matchvar.py')
         
         # 设置基因组版本和线程数
@@ -310,19 +375,22 @@ class MatchvarRunner:
         # Build protocol parameters
         protocol_str = ','.join(protocols)
         
-        # Build operation parameters
-        operations = []
-        for protocol in protocols:
-            operations.append(enhanced_configs[protocol]['operation'])
-        operation_str = ','.join(operations)
+        extra = additional_args or {}
+        operations = extra.get('operations')
+        if operations:
+            if len(operations) != len(protocols):
+                raise ValueError(
+                    f"Number of operations ({len(operations)}) must match protocols ({len(protocols)})"
+                )
+            operation_str = ','.join(operations)
+        else:
+            operation_str = ','.join(enhanced_configs[p]['operation'] for p in protocols)
         
-        # Build argument parameters (for most protocols, argument is empty)
-        arguments = ['' for _ in protocols]  # 使用空字符串作为默认参数
+        arguments = ['' for _ in protocols]
         argument_str = ','.join(arguments)
         
-        # Ensure all paths are absolute paths
         python_table_matchvar_abs = os.path.abspath(self.python_table_matchvar)
-        input_file_abs = os.path.abspath(os.path.join(self.input_files, input_file))
+        input_file_abs = self._resolve_input_path(input_file)
         humandb_abs = os.path.abspath(self.path_humandb)
         
         cmd_parts = [
@@ -358,6 +426,16 @@ class MatchvarRunner:
         # Add otherinfo parameter for complete annotation information
         cmd_parts.append('-otherinfo')
         print("添加-otherinfo参数以获取完整注释信息")
+
+        extra = additional_args or {}
+        low = input_file_abs.lower()
+        convert_vcf = bool(extra.get('convert_vcf') or extra.get('convertvcf'))
+        if convert_vcf:
+            cmd_parts.append('-convertvcf')
+            print("VCF → .mvinput：添加 -convertvcf（convert2matchvar 后再注释）")
+        elif low.endswith('.vcf') or low.endswith('.vcf.gz'):
+            cmd_parts.append('-vcfinput')
+            print("VCF 直读：添加 -vcfinput（不经过 convert2matchvar）")
         
         # Add thread count parameter
         cmd_parts.extend(['-thread', str(self.thread_count)])
@@ -376,7 +454,10 @@ class MatchvarRunner:
         
         # Add additional arguments if provided
         if additional_args:
+            skipped = {'use_mane_transcript', 'operations', 'convert_vcf', 'convertvcf'}
             for key, value in additional_args.items():
+                if key in skipped:
+                    continue
                 if isinstance(value, bool):
                     if value:
                         cmd_parts.extend([f'-{key}'])
@@ -411,6 +492,17 @@ class MatchvarRunner:
             print(f"准备自定义数据库时出错: {e}")
             import traceback
             traceback.print_exc()
+
+    def _resolve_input_path(self, input_file: str) -> str:
+        """Resolve a user-supplied path or a file stored under input_files/."""
+        if input_file and os.path.isfile(input_file):
+            return os.path.abspath(input_file)
+        nested = os.path.join(self.input_files, input_file) if input_file else ''
+        if nested and os.path.isfile(nested):
+            return os.path.abspath(nested)
+        if input_file:
+            return os.path.abspath(os.path.join(self.input_files, os.path.basename(input_file)))
+        raise FileNotFoundError("Input file path is empty")
     
     def run_matchvar(self, input_file: str, protocols: List[str] = None, 
                    buildver: str = 'hg19', output_prefix: str = 'matchvar_result',
@@ -430,9 +522,7 @@ class MatchvarRunner:
         """
         # Use default protocols if not specified
         if protocols is None:
-            protocols = ['refGene', 'ensGene', 'knownGene', 'cytoBand', 'exac03', 'avsift', 'dbnsfp42a', 
-                       'dbscsnv11', 'gnomad211_genome', 'esp6500siv2_all', 
-                       'revel', 'cadd13gt10', 'AlphaMissense']
+            protocols = list(self.DEFAULT_PROTOCOLS)
         
         # Log MANE transcript setting
         if additional_args and additional_args.get('use_mane_transcript'):
@@ -441,25 +531,26 @@ class MatchvarRunner:
             print("使用所有转录本注释模式")
         
         try:
-            # Check the input file type
-            input_path = os.path.join(self.input_files, input_file)
-            is_vcf = input_file.lower().endswith('.vcf')
+            # Check the input file type. VCF is annotated natively
+            # (CHROM POS REF ALT → internal 1-based closed alleles). No convert2matchvar.
+            input_path = self._resolve_input_path(input_file)
             
             # 清理可能存在的.orig文件，避免重命名冲突
             self._cleanup_orig_files(output_prefix)
             
-            # Convert VCF to MATCHVAR format if needed
-            if is_vcf:
-                print(f"Detected VCF file: {input_file}")
-                converted_file = self._convert_vcf_to_matchvar_input(input_file)
-                if not converted_file:
-                    print(f"VCF conversion failed for {input_file}")
-                    return None
-                input_file = converted_file
-                print(f"Using converted file: {input_file}")
+            low = input_path.lower()
+            convert_vcf = bool(additional_args and (
+                additional_args.get('convert_vcf') or additional_args.get('convertvcf')
+            ))
+            if convert_vcf and (low.endswith('.vcf') or low.endswith('.vcf.gz')):
+                print(f"Detected VCF file: {input_file} (convert2matchvar → .mvinput, then annotate)")
+            elif low.endswith('.vcf') or low.endswith('.vcf.gz'):
+                print(f"Detected VCF file: {input_file} (native CHROM/POS/REF/ALT)")
+            elif low.endswith('.mvinput'):
+                print(f"Detected MATCHVAR 5-column input: {input_file}")
             
             # Build MATCHVAR command
-            command = self.build_matchvar_command(input_file, protocols, buildver, output_prefix, additional_args)
+            command = self.build_matchvar_command(input_path, protocols, buildver, output_prefix, additional_args)
             print(f"Executing MATCHVAR command: {command}")
             
             # Execute MATCHVAR with process management
@@ -703,6 +794,7 @@ class MatchvarRunner:
                     
                     # 将所有的NaN值替换为空字符串
                     result_df = result_df.fillna('')
+                    result_df = _repair_shifted_multianno_df(result_df)
                     print(f"成功读取TSV文件，包含 {len(result_df)} 行数据")
                     
                     # 显示前几行的关键列以供调试
@@ -904,7 +996,7 @@ class MatchvarRunner:
             output_path = os.path.join(self.input_files, output_file)
             
             # Build the conversion command
-            input_path = os.path.join(self.input_files, vcf_file)
+            input_path = self._resolve_input_path(vcf_file)
             command = f"{PYTHON_EXECUTABLE} {convert2matchvar_script} -includeinfo -allsample -withfreq -format vcf4 {input_path} > {output_path}"
             
             print(f"Executing VCF conversion command: {command}")
@@ -979,9 +1071,7 @@ class MatchvarRunner:
         
         # If no protocol is specified, use default configuration
         if not protocols:
-            protocols = ['refGene', 'cytoBand', 'exac03', 'avsift', 'dbnsfp42a', 
-                       'dbscsnv11', 'gnomad211_genome', 'esp6500siv2_all', 
-                       'revel', 'cadd13gt10', 'AlphaMissense']
+            protocols = list(self.DEFAULT_PROTOCOLS)
         
         return self.run_matchvar(input_file, protocols, buildver, output_prefix)
     

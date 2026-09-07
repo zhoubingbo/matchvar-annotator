@@ -10,7 +10,6 @@ import argparse
 import logging
 import re
 import threading
-import io
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
 from urllib import request, error
@@ -19,19 +18,47 @@ try:
 except Exception:
     pysam = None
 
-# Set the encoding of standard output and error output to UTF-8
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-
-# Set log
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
 logger = logging.getLogger(__name__)
+
+
+def _mane_mod():
+    """加载 mane_transcripts：兼容包导入与脚本子进程两种运行方式。"""
+    try:
+        from . import mane_transcripts as _m
+        return _m
+    except ImportError:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import mane_transcripts as _m  # type: ignore
+    return _m
+
+
+def _query_fmt_mod():
+    try:
+        from . import query_format as _m
+        return _m
+    except ImportError:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import query_format as _m  # type: ignore
+    return _m
+
+
+def _resource_mod():
+    try:
+        from . import resource_files as _m
+        return _m
+    except ImportError:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import resource_files as _m  # type: ignore
+    return _m
 
 # Codon table
 CODON_TABLE = {
@@ -96,6 +123,7 @@ class AnnotateVariation:
         self.intronic_dup_remote = kwargs.get('intronic_dup_remote', False)
         # MANE transcript filtering
         self.use_mane_transcript = kwargs.get('use_mane_transcript', False)
+        self.vcfinput = kwargs.get('vcfinput', False)
         self.intronic_dup_window = int(kwargs.get('intronic_dup_window', 50) or 50)
         
         # Add new important parameters
@@ -160,11 +188,31 @@ class AnnotateVariation:
             else:
                 # Load MANE transcript mapping from default location
                 self.mane_transcripts = self._load_mane_transcripts()
+            try:
+                self._mane_all_ids = _mane_mod().all_mane_base_ids(self.mane_transcripts)
+            except Exception:
+                self._mane_all_ids = set()
         else:
             self.mane_transcripts = {}
+            self._mane_all_ids = set()
         
         # Process arguments
         self._process_arguments()
+        forced_fmt = kwargs.get('query_format')
+        if self.vcfinput:
+            forced_fmt = 'vcf'
+        if forced_fmt in ('vcf', 'mvinput'):
+            self.query_format = forced_fmt
+        else:
+            try:
+                self.query_format = _query_fmt_mod().sniff_query_format(self.queryfile)
+            except Exception:
+                self.query_format = "mvinput"
+        if self.query_format == "vcf":
+            logger.info("NOTICE: query is VCF (CHROM POS REF ALT); alleles mapped internally, no convert2matchvar")
+    
+    def _open_query_file(self):
+        return _query_fmt_mod().open_query_text(self.queryfile)
     
     def _process_arguments(self):
         """Process arguments"""
@@ -349,7 +397,7 @@ class AnnotateVariation:
     def _calculate_chunk_line(self, queryfile: str, thread: int) -> Tuple[int, int]:
         """Calculate chunk line count with adaptive chunking strategy"""
         try:
-            with open(queryfile, 'r', encoding='utf-8') as f:
+            with _query_fmt_mod().open_query_text(queryfile) as f:
                 line_count = sum(1 for line in f if line.strip() and not line.startswith('#'))
             
             # Adaptive chunking strategy: intelligently adjust chunk size based on file size and thread count
@@ -475,7 +523,7 @@ class AnnotateVariation:
             gene_db = self._load_gene_database()
             
             # Process query file
-            with open(self.queryfile, 'r', encoding='utf-8') as query_f, \
+            with self._open_query_file() as query_f, \
                  open(f"{self.outfile}.variant_function", 'w', encoding='utf-8') as var_f, \
                  open(f"{self.outfile}.exonic_variant_function", 'w', encoding='utf-8') as exonic_f:
                 
@@ -484,16 +532,9 @@ class AnnotateVariation:
                     if not line or line.startswith('#'):
                         continue
                     
-                    # Parse variant
-                    variant = self._parse_variant_line(line)
-                    if not variant:
-                        continue
-                    
-                    # Annotate variant
-                    annotation = self._annotate_variant_by_gene(variant, gene_db)
-                    
-                    # Write result
-                    self._write_gene_annotation(variant, annotation, var_f, exonic_f)
+                    for variant in self._parse_variant_line(line):
+                        annotation = self._annotate_variant_by_gene(variant, gene_db)
+                        self._write_gene_annotation(variant, annotation, var_f, exonic_f)
         
         except Exception as e:
             logger.error(f"Gene annotation failed: {e}")
@@ -504,10 +545,21 @@ class AnnotateVariation:
         gene_db = {}
         
         try:
-            gene_file = os.path.join(self.dbloc, f"{self.buildver}_{self.dbtype1}.txt")
-            if not os.path.exists(gene_file):
+            gene_file = None
+            try:
+                gene_file = _resource_mod().ensure_gene_pred(self.dbloc, self.dbtype1, self.buildver)
+            except Exception as exc:
+                logger.debug("ensure_gene_pred failed: %s", exc)
+            if not gene_file:
+                gene_file = os.path.join(self.dbloc, f"{self.buildver}_{self.dbtype1}.txt")
+                if not os.path.exists(gene_file):
+                    bare = os.path.join(self.dbloc, f"{self.dbtype1}.txt")
+                    if os.path.exists(bare):
+                        gene_file = bare
+            if not gene_file or not os.path.exists(gene_file):
                 logger.warning(f"Gene database file does not exist: {gene_file}")
                 return gene_db
+            logger.info(f"Loaded gene models from {gene_file}")
             
             # Load kgXref file (if it exists and is knownGene database)
             kgxref = {}
@@ -519,7 +571,10 @@ class AnnotateVariation:
                 else:
                     logger.warning(f"knownGene cross-reference file does not exist: {kgxreffile}")
             
-            with open(gene_file, 'r', encoding='utf-8') as f:
+            import gzip as _gzip
+            _open = _gzip.open if str(gene_file).endswith('.gz') else open
+            _mode = 'rt' if str(gene_file).endswith('.gz') else 'r'
+            with _open(gene_file, _mode, encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
                     if not line or line.startswith('#'):
@@ -528,7 +583,7 @@ class AnnotateVariation:
                     parts = line.split('\t')
                     
                     # Parse gene information based on database type
-                    if self.dbtype1 == 'refGene':
+                    if self.dbtype1 in ('refGene', 'ncbiRefSeq', 'gencode'):
                         if len(parts) < 15:
                             continue
                         # refGene format: bin, name, chrom, strand, txStart, txEnd, cdsStart, cdsEnd, exonCount, exonStarts, exonEnds, score, name2, cdsStartStat, cdsEndStat
@@ -670,20 +725,14 @@ class AnnotateVariation:
         
         return kgxref
     
-    def _parse_variant_line(self, line: str) -> Optional[Dict]:
-        """Parse variant line"""
-        parts = line.split('\t')
-        if len(parts) < 5:
-            return None
-        
-        return {
-            'chrom': parts[0],
-            'start': int(parts[1]),
-            'end': int(parts[2]),
-            'ref': parts[3],
-            'alt': parts[4],
-            'original_line': line
-        }
+    def _parse_variant_line(self, line: str) -> List[Dict]:
+        """Parse a query line: VCF (CHROM POS REF ALT) or MATCHVAR 5-column."""
+        try:
+            return _query_fmt_mod().parse_query_line(
+                line, fmt=getattr(self, "query_format", "auto")
+            )
+        except Exception:
+            return []
     
     def _annotate_variant_by_gene(self, variant: Dict, gene_db: Dict) -> Dict:
         """Annotate single variant"""
@@ -703,6 +752,64 @@ class AnnotateVariation:
                     overlapping_genes.append(gene)
         
         if not overlapping_genes:
+            # Near-gene: within self.neargene of txStart/txEnd → UTR-side cHGVS
+            near_hits = []
+            if chrom in gene_db:
+                for gene in gene_db[chrom]:
+                    tx_start = gene['txStart']
+                    tx_end = gene['txEnd']
+                    strand = gene.get('strand', '+')
+                    gene_name2 = gene.get('name2', gene.get('name', 'Unknown'))
+                    if end < tx_start:
+                        dist = tx_start - end
+                        side = 'txStart'
+                    elif start > tx_end:
+                        dist = start - tx_end
+                        side = 'txEnd'
+                    else:
+                        continue
+                    if dist > self.neargene:
+                        continue
+                    if side == 'txStart':
+                        label = 'utr5' if strand == '+' else 'utr3'
+                    else:
+                        label = 'utr3' if strand == '+' else 'utr5'
+                    near_hits.append((dist, label, gene_name2, gene))
+            if near_hits:
+                near_hits.sort(key=lambda x: x[0])
+                best_dist = near_hits[0][0]
+                chosen = [h for h in near_hits if h[0] == best_dist]
+                best_by_gene = {}
+                for h in chosen:
+                    gname = h[2]
+                    gene = h[3]
+                    tid = str(gene.get('name') or '')
+                    mane_score = 0
+                    if self.use_mane_transcript and self._mane_all_ids:
+                        try:
+                            bid = _mane_mod().base_transcript_id(tid)
+                            if bid and bid in self._mane_all_ids:
+                                mane_score = 2
+                            elif gname in self.mane_transcripts:
+                                mane_score = 1
+                        except Exception:
+                            mane_score = 0
+                    prev = best_by_gene.get(gname)
+                    if prev is None or mane_score > prev[0]:
+                        best_by_gene[gname] = (mane_score, h)
+                uniq = [v[1] for v in best_by_gene.values()]
+                details = []
+                for h in uniq:
+                    hgvs = self._format_near_gene_hgvs(variant, h[3], h[1], h[0])
+                    if hgvs:
+                        details.append(hgvs)
+                return {
+                    'function': ','.join(h[1] for h in uniq),
+                    'gene': ','.join(h[2] for h in uniq),
+                    'gene_detail': ','.join(details) if details else 'NA',
+                    'exonic_function': 'NA',
+                    'aa_change': 'NA'
+                }
             return {
                 'function': 'intergenic',
                 'gene': 'NA',
@@ -719,6 +826,115 @@ class AnnotateVariation:
         
         # Select best annotation
         return self._select_best_annotation(annotations)
+
+    def _format_c_allele_change(self, ref: str, alt: str, strand: str = '+') -> str:
+        """c.HGVS allele change: A>G / delTTAT / insA / delXXinsYY."""
+        ref_seq = str(ref or '').replace('-', '').replace('.', '').replace('*', '')
+        alt_seq = str(alt or '').replace('-', '').replace('.', '').replace('*', '')
+        if strand == '-':
+            if ref_seq:
+                ref_seq = self._reverse_complement(ref_seq)
+            if alt_seq:
+                alt_seq = self._reverse_complement(alt_seq)
+        if len(ref_seq) == 1 and len(alt_seq) == 1:
+            return f"{ref_seq}>{alt_seq}"
+        if ref_seq and not alt_seq:
+            return f"del{ref_seq}"
+        if alt_seq and not ref_seq:
+            return f"ins{alt_seq}"
+        if ref_seq and alt_seq:
+            return f"del{ref_seq}ins{alt_seq}"
+        return ""
+
+    def _format_intronic_c_hgvs(
+        self,
+        transcript_id: str,
+        intron_info: str,
+        n_base: int,
+        sign: str,
+        offset_a: int,
+        offset_b: int,
+        ref_seq: str,
+        alt_seq: str,
+    ) -> str:
+        """内含子 c.HGVS。多碱基缺失写 5'→3' 区间，与 VEP 一致：c.1000-12385_1000-12365del。"""
+        allele = self._format_c_allele_change(ref_seq, alt_seq, strand='+')
+        if not allele:
+            return f"{transcript_id}:{intron_info}:intronic:p.?"
+        a, b = max(int(offset_a), 1), max(int(offset_b), 1)
+        if sign == '+':
+            o1, o2 = sorted((a, b))
+        else:
+            o1, o2 = sorted((a, b), reverse=True)
+        if o1 == o2:
+            loc = f"c.{n_base}{sign}{o1}"
+        else:
+            loc = f"c.{n_base}{sign}{o1}_{n_base}{sign}{o2}"
+        if intron_info:
+            return f"{transcript_id}:{intron_info}:{loc}{allele}:p.?"
+        return f"{transcript_id}:{loc}{allele}:p.?"
+
+
+    def _format_near_gene_hgvs(self, variant: Dict, gene: Dict, label: str, dist: int) -> str:
+        """近基因位点按 UTR 规则写 cHGVS（相对 CDS：c.-N / c.*N）。"""
+        try:
+            tid = str(gene.get('name') or '').strip()
+            if not tid or tid == 'Unknown':
+                return ''
+            strand = gene.get('strand', '+')
+            cds_start = int(gene.get('cdsStart') or 0)
+            cds_end = int(gene.get('cdsEnd') or 0)
+            vstart = int(variant.get('start') or 0)
+            ref = str(variant.get('ref') or '')
+            alt = str(variant.get('alt') or '')
+
+            allele = self._format_c_allele_change(ref, alt, strand=strand)
+            if not allele:
+                return ''
+
+            has_cds = cds_end > cds_start
+            if label == 'utr5':
+                region = 'UTR5'
+                if has_cds:
+                    if strand == '+':
+                        utr_pos = max(cds_start - vstart, 1)
+                    else:
+                        utr_pos = max(vstart - cds_end, 1)
+                else:
+                    utr_pos = max(int(dist), 1)
+                cdot = f"c.-{utr_pos}"
+            else:
+                region = 'UTR3'
+                if has_cds:
+                    if strand == '+':
+                        utr_pos = max(vstart - cds_end, 1)
+                    else:
+                        utr_pos = max(cds_start - vstart, 1)
+                else:
+                    utr_pos = max(int(dist), 1)
+                cdot = f"c.*{utr_pos}"
+
+            return f"{tid}:{region}:{cdot}{allele}:p.?"
+        except Exception:
+            return ''
+
+    def _format_utr_exon_hgvs(self, transcript_id: str, region: str,
+                              pos_a: int, pos_b: int, ref: str, alt: str,
+                              strand: str = '+') -> str:
+        """UTR 外显子 cHGVS：c.-N / c.*N，多碱基缺失写区间。"""
+        allele = self._format_c_allele_change(ref, alt, strand=strand)
+        if not allele:
+            return ''
+        a = max(abs(int(pos_a or 0)), 1)
+        b = max(abs(int(pos_b or 0)), 1)
+        if a > b:
+            a, b = b, a
+        if region == 'UTR5':
+            cdot = f"c.-{a}" if a == b else f"c.-{a}_-{b}"
+        else:
+            cdot = f"c.*{a}" if a == b else f"c.*{a}_*{b}"
+        return f"{transcript_id}:{region}:{cdot}{allele}:p.?"
+
     
     def _analyze_variant_in_gene(self, variant: Dict, gene: Dict) -> Dict:
         """Analyze variant location in gene"""
@@ -1119,9 +1335,11 @@ class AnnotateVariation:
                     # UTR intronic: need to generate c.HGVS format
                     # This logic will be handled in the later code
                     # Directly call UTR intronic processing logic
-                    return self._generate_utr_intronic_hgvs(variant_start, ref, alt, strand, 
-                                                          exon_starts, exon_ends, cds_start, cds_end, 
-                                                          standard_transcript_id)
+                    return self._generate_utr_intronic_hgvs(
+                        variant_start, ref, alt, strand,
+                        exon_starts, exon_ends, cds_start, cds_end,
+                        standard_transcript_id, variant_end=variant_end,
+                    )
                 else:
                     # Non-UTR intronic: select the nearest boundary (the smaller the number after ±, the higher the priority), output c.N+/-offset expression
                     # First build CDS segments and calculate the CDS boundaries of each exon in cDNA
@@ -1169,13 +1387,12 @@ class AnnotateVariation:
                     candidates = []
                     if strand == '+':
                         # Positive strand: the previous exon end is '+', the next exon start is '-'
-                        candidates.append((abs(variant_start - e_p), '+', c_e_p, f"intron{i+1}"))
-                        candidates.append((abs(s_n - variant_start), '-', c_s_n, f"intron{i+1}"))
+                        candidates.append((abs(variant_start - e_p), '+', c_e_p, f"intron{i+1}", e_p))
+                        candidates.append((abs(s_n - variant_start), '-', c_s_n, f"intron{i+1}", s_n))
                     else:
-                        # Negative strand: the previous exon end is '+', the next exon start is '-'
-                        # Note: For negative strand, we need to use the correct coordinate variables
-                        candidates.append((abs(variant_start - s_p), '+', c_e_p, f"intron{i+1}"))
-                        candidates.append((abs(e_n - variant_start), '-', c_s_n, f"intron{i+1}"))
+                        # Negative strand: donor is 3' edge of 5' exon (s_p), acceptor is 5' edge of 3' exon (e_n)
+                        candidates.append((abs(variant_start - s_p), '+', c_e_p, f"intron{i+1}", s_p))
+                        candidates.append((abs(e_n - variant_start), '-', c_s_n, f"intron{i+1}", e_n))
                     # Select offset smaller; if equal, prioritize '+'
                     candidates.sort(key=lambda x: (x[0], 0 if x[1] == '+' else 1))
                     best = candidates[0]
@@ -1184,41 +1401,16 @@ class AnnotateVariation:
                 if not best:
                     return f"{standard_transcript_id}:intronic"
 
-                offset, sign, N_base, intron_info = best
-                # Process bases based on strand
+                offset, sign, N_base, intron_info, ref_point = best
+                offset_end = abs(variant_end - ref_point)
                 ref_b, alt_b = ref, alt
                 if strand == '-':
                     ref_b = self._reverse_complement(ref_b) if ref_b else ''
                     alt_b = self._reverse_complement(alt_b) if alt_b else ''
-
-                # Organize intronic c.HGVS based on variant type (SNV/deletion/insertion/substitution)
-                if len(ref_b) == 1 and len(alt_b) == 1:
-                    return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}{ref_b}>{alt_b}:p.?"
-                elif len(ref_b) > len(alt_b):
-                    if len(alt_b) == 0:
-                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}del{ref_b}:p.?"
-                    else:
-                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}del{ref_b}ins{alt_b}:p.?"
-                elif len(ref_b) < len(alt_b):
-                    if len(ref_b) == 0:
-                        # Insertion: try to identify dup remotely, otherwise output ins
-                        a = int(offset)
-                        b = max(1, a - 1)
-                        if sign == '+':
-                            o1, o2 = sorted([a, b])
-                        else:
-                            o1, o2 = sorted([a, b], reverse=True)
-                        if self.intronic_dup_remote:
-                            try:
-                                if self._is_intronic_dup_by_remote(variant['chrom'], variant['start'], alt_b, strand):
-                                    return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{o1}_{N_base}{sign}{o2}dup{alt_b}:p.?"
-                            except Exception:
-                                pass
-                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{o1}_{N_base}{sign}{o2}ins{alt_b}:p.?"
-                    else:
-                        return f"{standard_transcript_id}:{intron_info}:c.{N_base}{sign}{int(offset)}del{ref_b}ins{alt_b}:p.?"
-                else:
-                    return f"{standard_transcript_id}:intronic:p.?"
+                return self._format_intronic_c_hgvs(
+                    standard_transcript_id, intron_info, N_base, sign,
+                    offset, offset_end, ref_b, alt_b,
+                )
             
             # Check if it is in UTR region (exon or intron), if so, use special c.HGVS format
             # In refGene.txt, cds_start and cds_end are always cds_start < cds_end regardless of strand
@@ -1262,51 +1454,41 @@ class AnnotateVariation:
                 if in_utr_exon:
                     # UTR exonic: according to UTR region naming rules
                     if strand == '+':
-                        # Positive strand gene
                         if variant_start < cds_start:
-                            # UTR5: the first nucleotide of the start codon is +1, 5'UTR is negative
-                            # Calculate the distance to the start codon (negative)
-                            utr_position = variant_start - cds_start
-                            if len(ref) == 1 and len(alt) == 1:
-                                hgvs = f"{standard_transcript_id}:UTR5:c.-{abs(utr_position)}{ref}>{alt}:p.?"
-                            else:
-                                hgvs = f"{standard_transcript_id}:UTR5:c.-{abs(utr_position)}delins{alt}:p.?"
+                            pos_a = cds_start - variant_end
+                            pos_b = cds_start - variant_start
+                            hgvs = self._format_utr_exon_hgvs(
+                                standard_transcript_id, 'UTR5', pos_a, pos_b, ref, alt, strand='+'
+                            )
                         else:
-                            # UTR3: the last nucleotide of the stop codon is the boundary, 3'UTR is *1, *2, *3...
-                            # Calculate the distance to the stop codon (positive)
-                            utr_position = variant_start - cds_end
-                            if len(ref) == 1 and len(alt) == 1:
-                                hgvs = f"{standard_transcript_id}:UTR3:c.*{abs(utr_position)}{ref}>{alt}:p.?"
-                            else:
-                                hgvs = f"{standard_transcript_id}:UTR3:c.*{abs(utr_position)}delins{alt}:p.?"
+                            pos_a = variant_start - cds_end
+                            pos_b = variant_end - cds_end
+                            hgvs = self._format_utr_exon_hgvs(
+                                standard_transcript_id, 'UTR3', pos_a, pos_b, ref, alt, strand='+'
+                            )
                     else:
-                        # Negative strand gene
                         if variant_start > cds_end:
-                            # Negative strand gene: the region with larger genome coordinates corresponds to the 5' end of the transcript
-                            # So this is UTR5, the start codon is +1, 5'UTR is negative
-                            utr_position = variant_start - cds_end
-                            ref_seq = self._reverse_complement(ref) if ref else ''
-                            alt_seq = self._reverse_complement(alt) if alt else ''
-                            if len(ref_seq) == 1 and len(alt_seq) == 1:
-                                hgvs = f"{standard_transcript_id}:UTR5:c.-{abs(utr_position)}{ref_seq}>{alt_seq}:p.?"
-                            else:
-                                hgvs = f"{standard_transcript_id}:UTR5:c.-{abs(utr_position)}delins{alt_seq}:p.?"
+                            pos_a = variant_start - cds_end
+                            pos_b = variant_end - cds_end
+                            hgvs = self._format_utr_exon_hgvs(
+                                standard_transcript_id, 'UTR5', pos_a, pos_b, ref, alt, strand='-'
+                            )
                         else:
-                            # Negative strand gene: the region with smaller genome coordinates corresponds to the 3' end of the transcript
-                            # So this is UTR3, the stop codon is the boundary, 3'UTR is *1, *2, *3...
-                            utr_position = variant_start - cds_start
-                            ref_seq = self._reverse_complement(ref) if ref else ''
-                            alt_seq = self._reverse_complement(alt) if alt else ''
-                            if len(ref_seq) == 1 and len(alt_seq) == 1:
-                                hgvs = f"{standard_transcript_id}:UTR3:c.*{abs(utr_position)}{ref_seq}>{alt_seq}:p.?"
-                            else:
-                                hgvs = f"{standard_transcript_id}:UTR3:c.*{abs(utr_position)}delins{alt_seq}:p.?"
+                            pos_a = cds_start - variant_end
+                            pos_b = cds_start - variant_start
+                            hgvs = self._format_utr_exon_hgvs(
+                                standard_transcript_id, 'UTR3', pos_a, pos_b, ref, alt, strand='-'
+                            )
+                    if not hgvs:
+                        hgvs = f"{standard_transcript_id}:p.?"
                 else:
                     # UTR intronic: based on the neighboring exon number naming
                     # This logic has been moved to the _generate_utr_intronic_hgvs method
-                    return self._generate_utr_intronic_hgvs(variant_start, ref, alt, strand, 
-                                                          exon_starts, exon_ends, cds_start, cds_end, 
-                                                          standard_transcript_id)
+                    return self._generate_utr_intronic_hgvs(
+                        variant_start, ref, alt, strand,
+                        exon_starts, exon_ends, cds_start, cds_end,
+                        standard_transcript_id, variant_end=variant_end,
+                    )
                 
                 return hgvs
             else:
@@ -1344,10 +1526,9 @@ class AnnotateVariation:
                             offset = variant_start - seg_s
                             cds_pos = acc + offset + 1
                         else:
-                            # For negative strand genes, calculate position from the 5' end of CDS
-                            # For negative strand, 5' end corresponds to cds_end (larger genomic coordinate)
-                            # We need to calculate how many bases from the 5' end
-                            cds_pos = cds_end - variant_start + 1
+                            # Negative strand: 5'→3' walks high→low genomic within each CDS segment
+                            offset = seg_e - variant_start
+                            cds_pos = acc + offset + 1
                         break
                     acc += seg_len
 
@@ -1388,20 +1569,11 @@ class AnnotateVariation:
                 elif len(ref_seq) < len(alt_seq):
                     # Insertion or delins (ref is not empty)
                     if len(ref_seq) == 0:
-                        # Pure insertion: check the original variant information
-                        original_ref = variant.get('ref', '')
-                        original_alt = variant.get('alt', '')
-                        
-                        # If the original REF is "-", prioritize using delins format
-                        if original_ref == '-' or original_ref == '.' or original_ref == '*':
-                            # When REF is "-", use a single position instead of a position range
-                            hgvs = f"{standard_transcript_id}:exon{exon_num}:c.{cds_pos}delins{alt_seq}"
+                        # Pure insertion: c.N_(N+1)ins — do not write delins (coding_change would drop 1 bp)
+                        if strand == '+':
+                            hgvs = f"{standard_transcript_id}:exon{exon_num}:c.{cds_pos}_{cds_pos + 1}ins{alt_seq}"
                         else:
-                            # Regular insertion format
-                            if strand == '+':
-                                hgvs = f"{standard_transcript_id}:exon{exon_num}:c.{cds_pos}_{cds_pos+1}ins{alt_seq}"
-                            else:
-                                hgvs = f"{standard_transcript_id}:exon{exon_num}:c.{cds_pos-1}_{cds_pos}ins{alt_seq}"
+                            hgvs = f"{standard_transcript_id}:exon{exon_num}:c.{cds_pos - 1}_{cds_pos}ins{alt_seq}"
                     else:
                         if strand == '+':
                             start_pos = cds_pos
@@ -1468,8 +1640,12 @@ class AnnotateVariation:
             else:
                 return 'nonsynonymous_indel'
         elif len(ref) > len(alt):
+            if (len(ref) - len(alt)) % 3 == 0:
+                return 'nonframeshift_deletion'
             return 'frameshift_deletion'
         else:
+            if (len(alt) - len(ref)) % 3 == 0:
+                return 'nonframeshift_insertion'
             return 'frameshift_insertion'
     
     def _calculate_aa_change(self, variant: Dict, gene: Dict) -> str:
@@ -1525,9 +1701,9 @@ class AnnotateVariation:
                         offset = vpos - seg_s
                         cds_pos = acc + offset + 1
                     else:
-                        # For negative strand genes, calculate position from the 5' end of CDS
-                        # For negative strand, 5' end corresponds to cds_end (larger genomic coordinate)
-                        cds_pos = cds_end - vpos + 1
+                        # Negative strand: 5'→3' walks high→low genomic within each CDS segment
+                        offset = seg_e - vpos
+                        cds_pos = acc + offset + 1
                     break
                 acc += seg_len
             if cds_pos is None:
@@ -1567,8 +1743,9 @@ class AnnotateVariation:
             elif len(ref_seq) < len(alt_seq):
                 # Insertion
                 if len(ref_seq) == 0:
-                    # Pure insertion
-                    return f"{gene_name}:c.{cds_pos}_{cds_pos+1}ins{alt_seq}"
+                    if strand == '+':
+                        return f"{gene_name}:c.{cds_pos}_{cds_pos + 1}ins{alt_seq}"
+                    return f"{gene_name}:c.{cds_pos - 1}_{cds_pos}ins{alt_seq}"
                 else:
                     # Substitution insertion
                     end_pos = cds_pos + len(ref_seq) - 1
@@ -1845,7 +2022,7 @@ class AnnotateVariation:
             gene_with_detail = gene_name
         
         # Write to variant_function file
-        var_line = f"{annotation['function']}\t{gene_with_detail}\t{variant['original_line']}\n"
+        var_line = f"{annotation['function']}\t{gene_with_detail}\t{variant.get('query_line') or variant['original_line']}\n"
         var_f.write(var_line)
         
         # If it is an exonic variant, write to the exonic_variant_function file compatible with Perl
@@ -1869,25 +2046,17 @@ class AnnotateVariation:
             region_db = self._load_region_database()
             
             # Process the query file
-            with open(self.queryfile, 'r', encoding='utf-8') as query_f, \
+            with self._open_query_file() as query_f, \
                  open(f"{self.outfile}.{self.buildver}_{self.dbtype1}", 'w', encoding='utf-8') as output_f:
                 
                 for line in query_f:
                     line = line.strip()
                     if not line or line.startswith('#'):
                         continue
-                    
-                    # Parse the variant
-                    variant = self._parse_variant_line(line)
-                    if not variant:
-                        continue
-                    
-                    # Annotate the variant
-                    annotation = self._annotate_variant_by_region(variant, region_db)
-                    
-                    # Write the result
-                    output_line = f"{self.dbtype1}\t{annotation}\t{variant['original_line']}\n"
-                    output_f.write(output_line)
+                    for variant in self._parse_variant_line(line):
+                        annotation = self._annotate_variant_by_region(variant, region_db)
+                        qline = variant.get("query_line") or variant["original_line"]
+                        output_f.write(f"{self.dbtype1}\t{annotation}\t{qline}\n")
         
         except Exception as e:
             logger.error(f"Region annotation failed: {e}")
@@ -1898,26 +2067,40 @@ class AnnotateVariation:
         region_db = {}
         
         try:
-            region_file = os.path.join(self.dbloc, f"{self.buildver}_{self.dbtype1}.txt")
+            region_file = None
+            try:
+                region_file = _resource_mod().resolve_region_file(self.dbloc, self.dbtype1, self.buildver)
+            except Exception:
+                region_file = None
+            if not region_file:
+                region_file = os.path.join(self.dbloc, f"{self.buildver}_{self.dbtype1}.txt")
             if not os.path.exists(region_file):
                 logger.warning(f"Region database file does not exist: {region_file}")
                 return region_db
-            
-            with open(region_file, 'r', encoding='utf-8') as f:
+            logger.info(f"Loaded region database from {region_file}")
+
+            import gzip as _gzip
+            _open = _gzip.open if str(region_file).endswith('.gz') else open
+            _mode = 'rt' if str(region_file).endswith('.gz') else 'r'
+            with _open(region_file, _mode, encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
                     if not line or line.startswith('#'):
                         continue
-                    
+
                     parts = line.split('\t')
                     if len(parts) < 3:
                         continue
-                    
+
                     chrom = parts[0]
+                    if chrom.lower().startswith('chr'):
+                        chrom = chrom[3:]
+                    if chrom.upper() in ('M', 'MT'):
+                        chrom = 'M'
                     start = int(parts[1])
                     end = int(parts[2])
                     info = parts[3] if len(parts) > 3 else ''
-                    
+
                     if chrom not in region_db:
                         region_db[chrom] = []
                     region_db[chrom].append({
@@ -1936,6 +2119,10 @@ class AnnotateVariation:
         chrom = variant['chrom']
         start = variant['start']
         end = variant['end']
+        if str(chrom).lower().startswith('chr'):
+            chrom = chrom[3:]
+        if str(chrom).upper() in ('M', 'MT'):
+            chrom = 'M'
         
         if chrom not in region_db:
             return 'Unknown'
@@ -1956,7 +2143,7 @@ class AnnotateVariation:
             filter_db = self._load_filter_database()
             
             # Process the query file
-            with open(self.queryfile, 'r', encoding='utf-8') as query_f, \
+            with self._open_query_file() as query_f, \
                  open(f"{self.outfile}.{self.buildver}_{self.dbtype1}_filtered", 'w', encoding='utf-8') as filtered_f, \
                  open(f"{self.outfile}.{self.buildver}_{self.dbtype1}_dropped", 'w', encoding='utf-8') as dropped_f:
                 
@@ -1964,32 +2151,17 @@ class AnnotateVariation:
                     line = line.strip()
                     if not line or line.startswith('#'):
                         continue
-                    
-                    # Parse the variant
-                    variant = self._parse_variant_line(line)
-                    if not variant:
-                        continue
-                    
-                    # Filter the variant
-                    is_filtered = self._filter_variant(variant, filter_db)
-                    
-                    # Write the result
-                    if is_filtered:
-                        # Get the annotation information for matched variants database
-                        annotation_info = self._get_filter_annotation_info(variant, filter_db)
-                        
-                        if self.otherinfo:
-                            # When using otherinfo, output the complete annotation information
-                            filtered_f.write(f"{self.dbtype1}\t{annotation_info}\t{variant['original_line']}\n")
+                    for variant in self._parse_variant_line(line):
+                        is_filtered = self._filter_variant(variant, filter_db)
+                        qline = variant.get("query_line") or variant["original_line"]
+                        if is_filtered:
+                            annotation_info = self._get_filter_annotation_info(variant, filter_db)
+                            if self.otherinfo:
+                                filtered_f.write(f"{self.dbtype1}\t{annotation_info}\t{qline}\n")
+                            else:
+                                filtered_f.write(f"{self.dbtype1}\tFiltered\t{qline}\n")
                         else:
-                            # When not using otherinfo, only output the matching status
-                            filtered_f.write(f"{self.dbtype1}\tFiltered\t{variant['original_line']}\n")
-                    else:
-                        # For variants that don't match the database, use nastring (default ".")
-                        if self.otherinfo:
-                            dropped_f.write(f"{self.dbtype1}\t.\t{variant['original_line']}\n")
-                        else:
-                            dropped_f.write(f"{self.dbtype1}\t.\t{variant['original_line']}\n")
+                            dropped_f.write(f"{self.dbtype1}\t.\t{qline}\n")
         
         except Exception as e:
             logger.error(f"Filtering the query failed: {e}")
@@ -2177,7 +2349,7 @@ class AnnotateVariation:
         
         try:
             # Process the specified line range
-            with open(self.queryfile, 'r', encoding='utf-8') as query_f, \
+            with self._open_query_file() as query_f, \
                  open(var_output, 'w', encoding='utf-8') as var_f, \
                  open(exonic_output, 'w', encoding='utf-8') as exonic_f, \
                  open(invalid_output, 'w', encoding='utf-8') as invalid_f:
@@ -2194,18 +2366,13 @@ class AnnotateVariation:
                     line = line.strip()
                     if not line or line.startswith('#'):
                         continue
-                    
-                    # Parse the variant
-                    variant = self._parse_variant_line(line)
-                    if not variant:
+                    variants = self._parse_variant_line(line)
+                    if not variants:
                         invalid_f.write(f"line{line_count}\tInvalid format\t{line}\n")
                         continue
-                    
-                    # Annotate the variant
-                    annotation = self._annotate_variant_by_gene(variant, gene_db)
-                    
-                    # Write the result
-                    self._write_gene_annotation(variant, annotation, var_f, exonic_f)
+                    for variant in variants:
+                        annotation = self._annotate_variant_by_gene(variant, gene_db)
+                        self._write_gene_annotation(variant, annotation, var_f, exonic_f)
         
         except Exception as e:
             logger.error(f"Thread {thread_id} failed: {e}")
@@ -2217,7 +2384,7 @@ class AnnotateVariation:
         
         try:
             # Process the specified line range
-            with open(self.queryfile, 'r', encoding='utf-8') as query_f, \
+            with self._open_query_file() as query_f, \
                  open(output_file, 'w', encoding='utf-8') as output_f, \
                  open(invalid_output, 'w', encoding='utf-8') as invalid_f:
                 
@@ -2233,19 +2400,14 @@ class AnnotateVariation:
                     line = line.strip()
                     if not line or line.startswith('#'):
                         continue
-                    
-                    # Parse the variant
-                    variant = self._parse_variant_line(line)
-                    if not variant:
+                    variants = self._parse_variant_line(line)
+                    if not variants:
                         invalid_f.write(f"line{line_count}\tInvalid format\t{line}\n")
                         continue
-                    
-                    # Annotate the variant
-                    annotation = self._annotate_variant_by_region(variant, region_db)
-                    
-                    # Write the result
-                    output_line = f"{self.dbtype1}\t{annotation}\t{variant['original_line']}\n"
-                    output_f.write(output_line)
+                    for variant in variants:
+                        annotation = self._annotate_variant_by_region(variant, region_db)
+                        qline = variant.get("query_line") or variant["original_line"]
+                        output_f.write(f"{self.dbtype1}\t{annotation}\t{qline}\n")
         
         except Exception as e:
             logger.error(f"Thread {thread_id} failed: {e}")
@@ -2270,7 +2432,7 @@ class AnnotateVariation:
                     return
             
             # Process the specified line range
-            with open(self.queryfile, 'r', encoding='utf-8') as query_f, \
+            with self._open_query_file() as query_f, \
                  open(filtered_output, 'w', encoding='utf-8') as filtered_f, \
                  open(dropped_output, 'w', encoding='utf-8') as dropped_f, \
                  open(invalid_output, 'w', encoding='utf-8') as invalid_f:
@@ -2287,33 +2449,21 @@ class AnnotateVariation:
                     line = line.strip()
                     if not line or line.startswith('#'):
                         continue
-                    
-                    # Parse the variant
-                    variant = self._parse_variant_line(line)
-                    if not variant:
+                    variants = self._parse_variant_line(line)
+                    if not variants:
                         invalid_f.write(f"line{line_count}\tInvalid format\t{line}\n")
                         continue
-                    
-                    # Filter the variant
-                    is_filtered = self._filter_variant(variant, filter_db)
-                    
-                    # Write the result
-                    if is_filtered:
-                        # Get the annotation information
-                        annotation_info = self._get_filter_annotation_info(variant, filter_db)
-                        
-                        if self.otherinfo:
-                            # When using otherinfo, output the complete annotation information
-                            filtered_f.write(f"{self.dbtype1}\t{annotation_info}\t{variant['original_line']}\n")
+                    for variant in variants:
+                        is_filtered = self._filter_variant(variant, filter_db)
+                        qline = variant.get("query_line") or variant["original_line"]
+                        if is_filtered:
+                            annotation_info = self._get_filter_annotation_info(variant, filter_db)
+                            if self.otherinfo:
+                                filtered_f.write(f"{self.dbtype1}\t{annotation_info}\t{qline}\n")
+                            else:
+                                filtered_f.write(f"{self.dbtype1}\tFiltered\t{qline}\n")
                         else:
-                            # When not using otherinfo, only output the matching status
-                            filtered_f.write(f"{self.dbtype1}\tFiltered\t{variant['original_line']}\n")
-                    else:
-                        # For variants that don't match the database, use nastring (default ".")
-                        if self.otherinfo:
-                            dropped_f.write(f"{self.dbtype1}\t.\t{variant['original_line']}\n")
-                        else:
-                            dropped_f.write(f"{self.dbtype1}\t.\t{variant['original_line']}\n")
+                            dropped_f.write(f"{self.dbtype1}\t.\t{qline}\n")
         
         except Exception as e:
             logger.error(f"Thread {thread_id} failed: {e}")
@@ -2643,9 +2793,11 @@ class AnnotateVariation:
         except Exception:
             return False
 
-    def _generate_utr_intronic_hgvs(self, variant_start, ref, alt, strand, exon_starts, exon_ends, 
-                                   cds_start, cds_end, standard_transcript_id):
-        """Generate the HGVS format for UTR intronic variants""" 
+    def _generate_utr_intronic_hgvs(self, variant_start, ref, alt, strand, exon_starts, exon_ends,
+                                   cds_start, cds_end, standard_transcript_id, variant_end=None):
+        """Generate the HGVS format for UTR intronic variants"""
+        if variant_end is None:
+            variant_end = variant_start 
         # For UTR intronic variants, select the reference exon based on the position of the variant relative to the CDS
         # Find the CDS start and end exons
         cds_start_exon_idx = None
@@ -2768,8 +2920,9 @@ class AnnotateVariation:
         # Use the determined reference point to calculate the offset
         if reference_point is not None:
             
-            # Calculate the offset to the reference point
+            # Calculate the offset to the reference point (both ends for multi-base indels)
             offset = abs(variant_start - reference_point)
+            offset_end = abs(variant_end - reference_point)
             
             # The sign has already been determined above
             # For negative strand genes, the sign needs to be adjusted based on the transcript direction
@@ -2784,18 +2937,16 @@ class AnnotateVariation:
             
             reference_exon = reference_exon_num
             
-            # Process the base sequence
+            # Generate the HGVS format
             ref_seq = ref
             alt_seq = alt
             if strand == '-':
                 ref_seq = self._reverse_complement(ref) if ref else ''
                 alt_seq = self._reverse_complement(alt) if alt else ''
-            
-            # Generate the HGVS format
-            if len(ref_seq) == 1 and len(alt_seq) == 1:
-                hgvs = f"{standard_transcript_id}:c.{reference_exon}{sign}{offset}{ref_seq}>{alt_seq}:p.?"
-            else:
-                hgvs = f"{standard_transcript_id}:c.{reference_exon}{sign}{offset}delins{alt_seq}:p.?"
+            hgvs = self._format_intronic_c_hgvs(
+                standard_transcript_id, '', reference_exon, sign,
+                offset, offset_end, ref_seq, alt_seq,
+            )
         else:
             hgvs = f"{standard_transcript_id}:intronic:p.?"
         
@@ -2884,6 +3035,7 @@ def main():
     parser.add_argument('-memtotal', type=int, help='Total memory')
     parser.add_argument('-mane_file', type=str, help='MANE transcript mapping file')
     parser.add_argument('-use_mane_transcript', action='store_true', help='Use MANE transcript filtering')
+    parser.add_argument('-vcfinput', action='store_true', help='Treat query as VCF (CHROM POS REF ALT); auto-detected for .vcf and 4-column files')
     # Intronic dup online recognition
     parser.add_argument('--intronic_dup_remote', action='store_true', help='Use Ensembl REST to recognize intronic dup')
     parser.add_argument('--intronic_dup_window', type=int, default=50, help='Intronic dup recognition left window size')
@@ -2964,6 +3116,7 @@ def main():
         memtotal=args.memtotal,
         mane_file=args.mane_file,
         use_mane_transcript=args.use_mane_transcript,
+        vcfinput=args.vcfinput,
         intronic_dup_remote=args.intronic_dup_remote,
         intronic_dup_window=args.intronic_dup_window,
         _sift_threshold_explicitly_set=sift_threshold_explicitly_set,

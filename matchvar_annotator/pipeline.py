@@ -26,11 +26,18 @@ import matplotlib.pyplot as plt
 
 from .variant_simulation import GeneTranscript, ExonExtractor
 from .table_matchvar import TableAnnotator
+from .labeling import (
+    FUNC_LABEL_COLUMNS,
+    PATHOGENIC_TYPES,
+    first_present_column,
+    func_is_pathogenic,
+    label_from_vcf_info,
+)
 
 logger = logging.getLogger(__name__)
 
 # VCF INFO thresholds used by _lbl_from_info_str
-_PATHO_VT = frozenset({'SPLICING', 'SPLICE_SITE', 'FRAMESHIFT'})
+_PATHO_VT = PATHOGENIC_TYPES
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -108,14 +115,10 @@ def _labels_from_vcf_info(vcf_path: str) -> Optional[np.ndarray]:
     """
     Parse VCF INFO column and return per-position binary labels.
 
-    Each record is labelled 1 if TYPE is SPLICING/SPLICE_SITE/FRAMESHIFT or
-    if FRAMESHIFT=true; 0 otherwise.  When multiple records share a position
-    the label is the logical-OR of all record labels.
+    Each record is labelled 1 if TYPE is a high-impact class or FRAMESHIFT=true.
+    When multiple records share a position the label is the logical-OR of all
+    record labels.
     """
-    import re as _re
-    _TYPE_RE = _re.compile(r'(?:^|;)TYPE=([^;]+)')
-    _FRM_RE  = _re.compile(r'(?:^|;)FRAMESHIFT=([^;]+)')
-
     if not os.path.exists(vcf_path):
         logger.error(f" VCF file not found: {vcf_path}")
         return None
@@ -131,12 +134,7 @@ def _labels_from_vcf_info(vcf_path: str) -> Optional[np.ndarray]:
                 parts = line.strip().split('\t')
                 if len(parts) < 8:
                     continue
-                info  = parts[7]
-                vt_m  = _TYPE_RE.search(info)
-                fr_m  = _FRM_RE.search(info)
-                vt    = vt_m.group(1).upper().strip() if vt_m else ''
-                fr    = fr_m.group(1).lower().strip() if fr_m else 'false'
-                lbl   = int(vt in _PATHO_VT or fr == 'true')
+                lbl = label_from_vcf_info(parts[7])
                 if parts[1] not in pos_labels:
                     pos_labels[parts[1]] = lbl
                     pos_order.append(parts[1])
@@ -167,6 +165,7 @@ def _run_annotation_for_vcf(
     protocols: List[str],
     operations: List[str],
     threads: int,
+    remove: bool = True,
 ) -> str:
     """
     Standalone annotation helper: annotate a simulated VCF and return the
@@ -188,7 +187,7 @@ def _run_annotation_for_vcf(
         thread=threads,
         vcfinput=True,
         otherinfo=True,
-        remove=True,
+        remove=remove,
     )
 
     annotator.run_annotation()
@@ -214,60 +213,34 @@ def _get_true_labels(
     Extract binary ground-truth labels from an annotated DataFrame.
 
     Priority order:
-    1. Func.refGene / ExonicFunc.refGene
-    2. Otherinfo VCF-INFO columns (VCF INFO embedded in TSV text)
-    3. VCF file directly (most reliable for --operations f runs)
-    4. TYPE column
+    1. Function/Func/ExonicEffect/ExonicFunc gene-annotation columns
+    2. TYPE column
+    3. Otherinfo VCF-INFO columns
+    4. VCF file directly
 
     Returns:
         Integer ndarray of 0/1 labels, or None when no suitable source is found.
     """
-    import re as _re
-    _TYPE_RE = _re.compile(r'(?:^|;)TYPE=([^;]+)')
-    _FRM_RE  = _re.compile(r'(?:^|;)FRAMESHIFT=([^;]+)')
-
-    def _lbl_from_info_str(s: str) -> int:
-        vt_m = _TYPE_RE.search(s)
-        fr_m = _FRM_RE.search(s)
-        vt   = vt_m.group(1).upper().strip() if vt_m else ''
-        fr   = fr_m.group(1).lower().strip() if fr_m else 'false'
-        return int(vt in _PATHO_VT or fr == 'true')
-
-    # 1. Func.refGene
-    if 'Func.refGene' in df.columns:
-        func = df['Func.refGene'].fillna('').str.lower()
-        y    = func.str.contains(
-            'splicing|stopgain|stoploss|frameshift|nonsyn', na=False
-        ).astype(np.int8).values
-        logger.info(f" Extracted {y.sum()} positive labels from Func.refGene")
+    col = first_present_column(df.columns, FUNC_LABEL_COLUMNS)
+    if col:
+        values = df[col].fillna('').astype(str)
+        y = values.map(func_is_pathogenic).astype(np.int8).values
+        logger.info(f" Extracted {y.sum()} positive labels from {col}")
         return y
 
-    # 2. ExonicFunc.refGene
-    if 'ExonicFunc.refGene' in df.columns:
-        exo  = df['ExonicFunc.refGene'].fillna('').str.lower()
-        y    = exo.str.contains(
-            'splicing|stopgain|stoploss|frameshift|nonsynonymous', na=False
-        ).astype(np.int8).values
-        logger.info(f" Extracted {y.sum()} positive labels from ExonicFunc.refGene")
-        return y
-
-    # 3. TYPE column
     if 'TYPE' in df.columns:
-        var_type  = df['TYPE'].fillna('').str.upper()
-        y         = var_type.isin(
-            ['SPLICE_SITE', 'FRAMESHIFT', 'NONSENSE', 'STOPLOSS']
-        ).astype(np.int8).values
+        var_type = df['TYPE'].fillna('').str.upper()
+        y = var_type.isin(PATHOGENIC_TYPES).astype(np.int8).values
         logger.info(f" Extracted {y.sum()} positive labels from TYPE column")
         return y
 
-    # 4. Otherinfo columns – parse VCF INFO from embedded text
     for col in df.columns:
-        if not col.startswith('Otherinfo'):
+        if not str(col).startswith('Otherinfo'):
             continue
-        raw    = df[col].fillna('').astype(str)
-        labels = [_lbl_from_info_str(v) for v in raw]
+        raw = df[col].fillna('').astype(str)
+        labels = [label_from_vcf_info(v) for v in raw]
         if sum(labels) == 0:
-            continue   # not an INFO column – try next Otherinfo
+            continue
         y = np.array(labels, dtype=np.int8)
         logger.info(
             f" Extracted {y.sum()} positive labels from VCF INFO in "
@@ -275,7 +248,6 @@ def _get_true_labels(
             f"{y.sum() / max(len(y), 1):.1%})")
         return y
 
-    # 5. VCF file directly
     if vcf_path and os.path.exists(vcf_path):
         y = _labels_from_vcf_info(vcf_path)
         if y is not None and len(y) > 0:
@@ -285,7 +257,7 @@ def _get_true_labels(
             return y
 
     logger.error(
-        " No label source found. Tried: Func.refGene / ExonicFunc.refGene / "
+        " No label source found. Tried: Function/Func/ExonicEffect columns / "
         "TYPE / Otherinfo (VCF INFO) / VCF file.")
     return None
 
@@ -543,7 +515,9 @@ class MatchingPipeline:
                  constraint_filter: bool = False,
                  spectrum_ratio: float = 0.7,
                  score_correction_method: str = 'none',
-                 score_correction_clusters: int = 3):
+                 score_correction_clusters: int = 3,
+                 enable_visualization: bool = True,
+                 keep_temp: bool = False):
         """
         Initialize the matching pipeline.
 
@@ -600,6 +574,8 @@ class MatchingPipeline:
         self.spectrum_ratio              = spectrum_ratio
         self.score_correction_method     = score_correction_method
         self.score_correction_clusters   = score_correction_clusters
+        self.enable_visualization        = enable_visualization
+        self.keep_temp                   = keep_temp
 
         self.transcript:    Optional[GeneTranscript] = None
         self.variants:      Optional[Dict]           = None
@@ -659,7 +635,11 @@ class MatchingPipeline:
         scores = self._calculate_auroc_scores()
 
         logger.info("==================== [STEP 4/4] Visualization ====================")
-        figures = self._generate_visualizations(scores)
+        figures = {}
+        if self.enable_visualization:
+            figures = self._generate_visualizations(scores)
+        else:
+            logger.info(" Visualization skipped (--no-visualization)")
 
         total_variants = _count_total_variants(self.variants)
         results = {
@@ -718,12 +698,17 @@ class MatchingPipeline:
         self.variants = variants_dict
 
     def _run_simulation_spectrum(self) -> None:
-        """Spectrum-aware variant simulation using utils."""
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from variant_simulation import ExonExtractor
-        from utils.enhanced_data_simulation import EnhancedGeneTranscript
-        
+        """Spectrum-aware variant simulation."""
+        try:
+            from .enhanced_data_simulation import EnhancedGeneTranscript
+        except ImportError:
+            logger.warning(
+                "spectrum simulation is unavailable "
+                "(missing enhanced_data_simulation); falling back to traditional"
+            )
+            self._run_simulation_traditional()
+            return
+
         try:
             extractor = ExonExtractor(self.gtf_file, self.fasta_file)
             exons, chromosome, strand = extractor.extract_exons(self.gene_name, self.transcript_id)
@@ -745,6 +730,7 @@ class MatchingPipeline:
                 strand=strand,
                 genome=extractor.genome,
                 fasta_file=self.fasta_file,
+                genome_version=self.buildver,
             )
             
             variants_result = enhanced_tx.generate_spectrum_aware_variants(
@@ -772,12 +758,17 @@ class MatchingPipeline:
             self._run_simulation_traditional()
 
     def _run_simulation_hybrid(self) -> None:
-        """Hybrid variant simulation using utils."""
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from variant_simulation import ExonExtractor
-        from utils.enhanced_data_simulation import EnhancedGeneTranscript
-        
+        """Hybrid variant simulation (spectrum SNVs + traditional SNV/splice)."""
+        try:
+            from .enhanced_data_simulation import EnhancedGeneTranscript
+        except ImportError:
+            logger.warning(
+                "hybrid simulation is unavailable "
+                "(missing enhanced_data_simulation); falling back to traditional"
+            )
+            self._run_simulation_traditional()
+            return
+
         try:
             extractor = ExonExtractor(self.gtf_file, self.fasta_file)
             exons, chromosome, strand = extractor.extract_exons(self.gene_name, self.transcript_id)
@@ -799,6 +790,7 @@ class MatchingPipeline:
                 strand=strand,
                 genome=extractor.genome,
                 fasta_file=self.fasta_file,
+                genome_version=self.buildver,
             )
             
             variants_result = enhanced_tx.generate_hybrid_variants(
@@ -836,6 +828,7 @@ class MatchingPipeline:
             protocols=self.protocols,
             operations=self.operations,
             threads=self.threads,
+            remove=not self.keep_temp,
         )
         logger.info(f" Annotation completed: {self.annotated_tsv}")
 
@@ -1018,9 +1011,12 @@ def run_pipeline(gtf_file: str, fasta_file: str, gene_name: str, transcript_id: 
             protocols=kwargs.get('protocols', ['refGene']),
             operations=kwargs.get('operations', ['g']),
             threads=kwargs.get('threads', 4),
+            remove=not kwargs.get('keep_temp', False),
         )
         scores  = _calculate_auroc_scores_from_tsv(merged_annotated_tsv, merged_vcf)
-        figs    = _generate_visualizations_for_scores(scores, output_dir, "merged_genes")
+        figs    = {}
+        if kwargs.get('enable_visualization', True):
+            figs = _generate_visualizations_for_scores(scores, output_dir, "merged_genes")
         total_variants = sum(r.get('total_variants', 0) for r in all_results.values())
 
         merged_main_result = {

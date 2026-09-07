@@ -94,60 +94,128 @@ def diff_proteins(wt: str, mut: str) -> Tuple[int, str, str, int]:
     return i + 1, aa1_diff, aa2_diff, (j1 + 1)  # 1-based 起始，pos2 使用wt端结束位置
 
 def format_p_hgvs_from_diff(wt: str, mut: str, chrom: str, effect_hint: Optional[str] = None) -> Tuple[str, str]:
-    """根据蛋白差异生成p.注释与effect。优先处理frameshift/stopgain等情况。"""
-    pos1, aa1, aa2, pos2 = diff_proteins(wt, mut)
-    if pos1 == 0:
-        # 无氨基酸差异：HGVS 推荐 p.(=)
+    """根据蛋白差异生成 p. 注释与 effect。
+
+    整码 indel/dup/delins/错义/终止丢失逻辑对齐 test/local_hgvs_frameshift.format_inframe_protein_hgvs；
+    移码仍输出 MATCHVAR 惯用的 fs*N。
+    translate_protein 会把终止符 '*' 留在串内；整码比较时先去掉，与 TransVar 肽段一致。
+    """
+    if wt == mut:
         return 'p.(=)', 'synonymous_SNV'
-    # 若遇到'*'，判断stopgain/stoploss
-    # 简化：当aa2含'*'且位置在差异段内，视为stopgain
-    if '*' in aa2:
-        return f'p.{three_letter(wt[pos1-1])}{pos1}Ter', 'stopgain'
-    if '*' in wt[pos1-1:pos2]:  # 野生型差异窗口含终止
-        return f'p.Ter{pos1}{three_letter(mut[pos1-1])}', 'stoploss'
-    # frameshift 专用：若上层判定为frameshift，则计算至新终止子的距离
+
+    # frameshift：保留 '*'，用于计算 fs*N
     if effect_hint == 'frameshift':
-        # 终止位置：从差异起点在 mutated 蛋白中寻找 '*'
-        start_idx = max(0, pos1 - 1)
+        start_idx = 0
+        while start_idx < len(wt) and start_idx < len(mut) and wt[start_idx] == mut[start_idx]:
+            start_idx += 1
         stop_idx = mut.find('*', start_idx)
         if stop_idx == -1:
             fs_len = max(0, len(mut) - start_idx)
         else:
-            fs_len = stop_idx - start_idx
+            fs_len = stop_idx - start_idx + 1  # 含终止密码子本身
+        ref_aa = wt[start_idx] if start_idx < len(wt) and wt[start_idx] != '*' else '?'
         new_aa = mut[start_idx] if start_idx < len(mut) and mut[start_idx] != '*' else '?'
-        p = f'p.{three_letter(wt[pos1-1])}{pos1}{three_letter(new_aa)}fs*{fs_len}'
+        pos1 = start_idx + 1
+        p = f'p.{three_letter(ref_aa)}{pos1}{three_letter(new_aa)}fs*{fs_len}'
         return p, 'frameshift'
-    # 同义变化（单点且AA相同）已在上层过滤；此处处理常见情况
-    if len(aa1) == 1 and len(aa2) == 1:
-        if aa1 == aa2:
-            return f'p.{three_letter(aa1)}{pos1}{three_letter(aa2)}', 'synonymous_SNV'
-        else:
-            return f'p.{three_letter(aa1)}{pos1}{three_letter(aa2)}', 'nonsynonymous_SNV'
-    # 指定为dup的非移码插入：优先输出 dup 语法
-    if effect_hint == 'dup':
-        # 以差异窗口为界，aa2 为被复制的氨基酸序列
-        if len(aa2) >= 1:
-            left = wt[pos1-1] if pos1-1 < len(wt) else ''
-            right = wt[pos2-1] if pos2-1 < len(wt) and pos2 >= pos1 else left
-            dup_seq = ''.join(three_letter(x) for x in aa2)
-            if len(aa2) == 1:
-                return f'p.{three_letter(aa2[0])}{pos1}dup', 'nonframeshift_duplication'
-            else:
-                return f'p.{three_letter(left)}{pos1}_{three_letter(right)}{pos2}dup{dup_seq}', 'nonframeshift_duplication'
-    # 插入
-    if len(mut) > len(wt) and len(aa2) > len(aa1):
-        left = wt[pos1-1] if pos1-1 < len(wt) else ''
-        right = wt[pos2-1] if pos2-1 < len(wt) and pos2 >= pos1 else left
-        ins_seq = ''.join(three_letter(x) for x in aa2)
-        return f'p.{three_letter(left)}{pos1}_{three_letter(right)}{pos2}ins{ins_seq}', 'nonframeshift_insertion'
-    # 删除
-    if len(mut) < len(wt) and len(aa1) > len(aa2):
-        if len(aa1) == 1:
-            return f'p.{three_letter(aa1)}{pos1}del', 'nonframeshift_deletion'
-        else:
-            return f'p.{three_letter(aa1[0])}{pos1}_{three_letter(aa1[-1])}{pos2}del', 'nonframeshift_deletion'
-    # 替换/复合
-    return f'p.{three_letter(aa1[0])}{pos1}_{three_letter(aa1[-1])}{pos2}delins' + ''.join(three_letter(x) for x in aa2), 'inframe_substitution'
+
+    # 整码路径：去掉终止符再比较（对齐 TransVar _translate_peptide）
+    wt = wt.rstrip('*')
+    mut = mut.rstrip('*')
+    if wt == mut:
+        return 'p.(=)', 'synonymous_SNV'
+
+    start = 0
+    while start < len(wt) and start < len(mut) and wt[start] == mut[start]:
+        start += 1
+
+    # 终止丢失 / C 端延伸：原肽已走完，突变肽仍继续
+    if start >= len(wt) and start < len(mut):
+        stop_pos = len(wt) + 1  # 原终止密码子位置（1-based）
+        first_aa = mut[start]
+        ext_ter = (len(mut) - start) + 1
+        return (
+            f'p.Ter{stop_pos}{three_letter(first_aa)}extTer{ext_ter}',
+            'stoploss',
+        )
+
+    # 提前终止：突变肽更短且无公共后缀可剪到非空 mid（新终止截断）
+    if start < len(wt) and start >= len(mut):
+        return f'p.{three_letter(wt[start])}{start + 1}Ter', 'stopgain'
+
+    end_wt = len(wt)
+    end_mut = len(mut)
+    while end_wt > start and end_mut > start and wt[end_wt - 1] == mut[end_mut - 1]:
+        end_wt -= 1
+        end_mut -= 1
+
+    wt_mid = wt[start:end_wt]
+    mut_mid = mut[start:end_mut]
+    pos = start + 1  # 1-based
+
+    # 纯插入（优先识别串联重复 → p.…dup）
+    if not wt_mid and mut_mid:
+        n_ins = len(mut_mid)
+        if start >= n_ins and wt[start - n_ins:start] == mut_mid:
+            left_pos = pos - n_ins
+            if n_ins == 1:
+                return f'p.{three_letter(mut_mid[0])}{left_pos}dup', 'nonframeshift_duplication'
+            return (
+                f'p.{three_letter(mut_mid[0])}{left_pos}_'
+                f'{three_letter(mut_mid[-1])}{pos - 1}dup',
+                'nonframeshift_duplication',
+            )
+        ins = ''.join(three_letter(x) for x in mut_mid)
+        if start == 0:
+            if not wt:
+                return 'p.?', 'unknown'
+            return (
+                f'p.{three_letter(wt[0])}1delins{ins}{three_letter(wt[0])}',
+                'nonframeshift_insertion',
+            )
+        left_aa = wt[start - 1]
+        right_aa = wt[start]
+        left_pos = pos - 1
+        return (
+            f'p.{three_letter(left_aa)}{left_pos}_{three_letter(right_aa)}{pos}ins{ins}',
+            'nonframeshift_insertion',
+        )
+
+    # 纯缺失
+    if wt_mid and not mut_mid:
+        n_del = len(wt_mid)
+        if n_del == 1:
+            return f'p.{three_letter(wt_mid[0])}{pos}del', 'nonframeshift_deletion'
+        end_pos = pos + n_del - 1
+        return (
+            f'p.{three_letter(wt_mid[0])}{pos}_'
+            f'{three_letter(wt_mid[-1])}{end_pos}del',
+            'nonframeshift_deletion',
+        )
+
+    # 替换（含单氨基酸错义 / delins）
+    if wt_mid and mut_mid:
+        if len(wt_mid) == 1 and len(mut_mid) == 1:
+            if wt_mid == mut_mid:
+                return f'p.{three_letter(wt_mid[0])}{pos}=', 'synonymous_SNV'
+            return (
+                f'p.{three_letter(wt_mid[0])}{pos}{three_letter(mut_mid[0])}',
+                'nonsynonymous_SNV',
+            )
+        alt = ''.join(three_letter(x) for x in mut_mid)
+        if len(wt_mid) == 1:
+            return (
+                f'p.{three_letter(wt_mid[0])}{pos}delins{alt}',
+                'inframe_substitution',
+            )
+        end_pos = pos + len(wt_mid) - 1
+        return (
+            f'p.{three_letter(wt_mid[0])}{pos}_'
+            f'{three_letter(wt_mid[-1])}{end_pos}delins{alt}',
+            'inframe_substitution',
+        )
+
+    return 'p.?', 'unknown'
 
 def apply_c_hgvs_to_cds(cds: str, cchange: str) -> Tuple[str, Optional[str]]:
     """将 c.HGVS 应用于 CDS，返回(突变后CDS, effect_hint)。effect_hint 可为 frameshift/nonframeshift/None"""
@@ -192,15 +260,17 @@ def apply_c_hgvs_to_cds(cds: str, cchange: str) -> Tuple[str, Optional[str]]:
         seq = m.group(3).upper()
         # HGVS 插入在两个碱基“之间”，此处按 left 位置后插入
         return s[:left] + seq + s[left:], 'frameshift' if len(seq) % 3 != 0 else 'nonframeshift'
-    # 4) dup: NdupSEQ / N_MdupSEQ（重复）
-    m = re.match(r'^(\d+)dup([ACGTN]+)$', c, re.IGNORECASE)
+    # 4) dup: Ndup[SEQ] / N_Mdup[SEQ]（重复；无 SEQ 时从 CDS 截取）
+    m = re.match(r'^(\d+)dup([ACGTN]*)$', c, re.IGNORECASE)
     if m:
-        pos = int(m.group(1)); seq = m.group(2).upper()
+        pos = int(m.group(1))
+        seq = (m.group(2) or s[pos - 1:pos]).upper()
         return s[:pos] + seq + s[pos:], 'dup' if len(seq) % 3 == 0 else 'frameshift'
-    m = re.match(r'^(\d+)_([\d]+)dup([ACGTN]+)$', c, re.IGNORECASE)
+    m = re.match(r'^(\d+)_(\d+)dup([ACGTN]*)$', c, re.IGNORECASE)
     if m:
-        start = int(m.group(1)); end = int(m.group(2)); seq = m.group(3).upper()
-        # 在区间末端后插入重复序列
+        start = int(m.group(1)); end = int(m.group(2))
+        seq = (m.group(3) or s[start - 1:end]).upper()
+        # 在区间末端后插入重复序列（转录 3′ 侧）
         return s[:end] + seq + s[end:], 'dup' if len(seq) % 3 == 0 else 'frameshift'
     # 5) delins: NdelinsSEQ / N_MdelinsSEQ
     m = re.match(r'^(\d+)delins([ACGTN]+)$', c, re.IGNORECASE)
@@ -242,98 +312,123 @@ def normalize_c_hgvs(cdot: str) -> str:
         cd = 'c.' + cd
     return cd
 
-def _ceil_div3(n: int) -> int:
-    return (n + 2) // 3
 
-def _floor_div3(n: int) -> int:
-    return n // 3
+def _format_dup_cdot(start: int, end: int) -> str:
+    if start == end:
+        return f"c.{start}dup"
+    return f"c.{start}_{end}dup"
+
+
+def _ins_to_dup_if_tandem(dna: str, left: int, ins: str) -> Optional[str]:
+    """若插入序列等于其 5′ 侧邻接序列 → HGVS 优先记为 dup（3′ 端已对齐后调用）。"""
+    k = len(ins)
+    if k < 1 or left < k:
+        return None
+    if dna[left - k:left].upper() != ins.upper():
+        return None
+    return _format_dup_cdot(left - k + 1, left)
+
+
+def normalize_coding_indel_hgvs(cdot: str, coding_dna: str) -> str:
+    """按 HGVS 对 CDS 内 indel 做 3′ 规则归一化，并优先将串联插入写为 dup。
+
+    - 仅处理纯编码区数字坐标（不含 c.*N / c.N+d / c.-N）
+    - 3′ = CDS 坐标增大方向（转录本 3′）
+    - 插入在 3′ 对齐后若与紧邻 5′ 序列相同 → ``c.a_bdup``
+    """
+    if not cdot or not coding_dna:
+        return cdot
+    cd = normalize_c_hgvs(cdot)
+    body = cd[2:] if cd.lower().startswith('c.') else cd
+    # 剪接/UTR 偏移不在此归一化
+    if re.search(r'[+*\-]', body):
+        return cd
+    dna = coding_dna.upper()
+    n = len(dna)
+
+    # --- insertion: c.A_BinsSEQ ---
+    m = re.match(r'^(\d+)_(\d+)ins([ACGTN]+)$', body, re.IGNORECASE)
+    if m:
+        left, right = int(m.group(1)), int(m.group(2))
+        ins = m.group(3).upper()
+        if right != left + 1 or left < 1 or left > n:
+            return cd
+        # 3′ roll：若插入点 3′ 碱基 == 插入序列首碱基，则右移并旋转
+        from collections import deque
+        buf = deque(ins)
+        pos = left  # 插在 pos 之后；3′ 侧碱基 0-based 下标为 pos
+        while pos < n and buf and dna[pos] == buf[0]:
+            buf.append(buf.popleft())
+            pos += 1
+        ins2 = ''.join(buf)
+        left2 = pos
+        dup = _ins_to_dup_if_tandem(dna, left2, ins2)
+        if dup:
+            return dup
+        return f"c.{left2}_{left2 + 1}ins{ins2}"
+
+    # --- deletion: c.Adel / c.A_Bdel ---
+    m = re.match(r'^(\d+)(?:_(\d+))?del([ACGTN]*)$', body, re.IGNORECASE)
+    if m:
+        start = int(m.group(1))
+        end = int(m.group(2) or start)
+        delseq = (m.group(3) or '').upper()
+        if start < 1 or end < start or end > n:
+            return cd
+        obs = dna[start - 1:end]
+        if delseq and delseq != obs:
+            return cd  # 与本地 CDS 不一致时不强行滚动
+        delseq = obs
+        # 3′ roll deletion
+        while end < n and delseq and dna[end] == delseq[0]:
+            delseq = delseq[1:] + dna[end]
+            start += 1
+            end += 1
+        if start == end:
+            return f"c.{start}del{delseq}"
+        return f"c.{start}_{end}del{delseq}"
+
+    # --- duplication: c.Adup / c.A_Bdup ---
+    m = re.match(r'^(\d+)(?:_(\d+))?dup([ACGTN]*)$', body, re.IGNORECASE)
+    if m:
+        start = int(m.group(1))
+        end = int(m.group(2) or start)
+        dupseq = (m.group(3) or '').upper()
+        if start < 1 or end < start or end > n:
+            return cd
+        obs = dna[start - 1:end]
+        if dupseq and dupseq != obs:
+            return cd
+        # dup ≡ 在 end 之后插入 obs；按插入做 3′ 对齐后再写回 dup
+        from collections import deque
+        buf = deque(obs)
+        pos = end
+        while pos < n and buf and dna[pos] == buf[0]:
+            buf.append(buf.popleft())
+            pos += 1
+        ins2 = ''.join(buf)
+        left2 = pos
+        dup = _ins_to_dup_if_tandem(dna, left2, ins2)
+        return dup if dup else _format_dup_cdot(left2 - len(ins2) + 1, left2)
+
+    return cd
+
+
+def _is_inframe_len(n: int) -> bool:
+    """净长度变化是否为 3 的倍数（整码）。"""
+    return n % 3 == 0
+
 
 def detect_duplication_cdot(cdot: str, coding_dna: str) -> Optional[Tuple[str, Tuple[int, int], str]]:
-    """检测 c.HGVS 是否可归并为 dup，并返回 (dup_cdot, (n1, n2), nt_seq)。
-    规则（改进版）：
-    - 对 c.N_MinsSEQ：若 coding_dna[(N-len(seq)) : N] == seq，则视为复制了 [N-len(seq)+1, N] 区间 → c.(N-len+1)_(N)dupSEQ
-    - 对 c.N_MdelinsSEQ：若删除长度为0或插入序列等于左侧相邻序列，同上（作为 dup）。
-    - 增加更严格的重复检测条件，避免将简单插入错误识别为重复
-    """
-    if not cdot:
+    """兼容旧接口：委托 HGVS 3′ 归一化；若结果为 dup 则解析区间。"""
+    norm = normalize_coding_indel_hgvs(cdot, coding_dna)
+    m = re.match(r'^c\.(\d+)(?:_(\d+))?dup([ACGTN]*)$', norm, re.IGNORECASE)
+    if not m:
         return None
-    cd = normalize_c_hgvs(cdot)
-    cd_nopre = cd.replace('c.', '')
-    
-    # ins 情形（尝试严格匹配，失败则尝试左移或修剪尾碱基以获得最简重复）
-    m = re.match(r'^(\d+)_(\d+)ins([ACGTN]+)$', cd_nopre, re.IGNORECASE)
-    if m:
-        left = int(m.group(1))  # 插入点左侧核苷酸位置（1-based）
-        seq = m.group(3).upper(); k = len(seq)
-        
-        # 增加重复检测的严格条件
-        # 1. 序列长度必须大于等于3个碱基
-        if k < 3:
-            return None
-            
-        # 2. 检查是否为简单的重复模式（如AAAA, TTTT等）
-        if len(set(seq)) == 1:
-            # 单碱基重复，需要更严格的匹配
-            if left >= k * 2 and coding_dna[left - k*2:left] == seq + seq:
-                return f"c.{left - k*2 + 1}_{left}dup{seq}", (left - k*2 + 1, left), seq
-            return None
-        
-        # 3. 精确匹配：左侧k碱基等于插入序列
-        if left >= k and coding_dna[left - k:left] == seq:
-            # 额外检查：确保不是简单的插入
-            # 如果插入序列在基因组中频繁出现，可能是简单插入
-            seq_count = coding_dna.count(seq)
-            if seq_count > 5:  # 如果序列在CDS中出现超过5次，可能是简单插入
-                return None
-            return f"c.{left - k + 1}_{left}dup{seq}", (left - k + 1, left), seq
-        
-        # 4. 尝试修剪尾部（常见多写一碱基）：seq[:-1]
-        if k > 1 and left >= (k - 1) and coding_dna[left - (k - 1):left] == seq[:-1]:
-            seq2 = seq[:-1]; k2 = k - 1
-            # 同样检查修剪后的序列
-            if len(set(seq2)) == 1 and k2 < 3:
-                return None
-            return f"c.{left - k2 + 1}_{left}dup{seq2}", (left - k2 + 1, left), seq2
-        
-        # 5. 尝试左移一位匹配
-        if left - 1 >= k and coding_dna[left - 1 - k:left - 1] == seq:
-            # 检查左移后的匹配是否合理
-            if len(set(seq)) == 1 and k < 3:
-                return None
-            return f"c.{left - 1 - k + 1}_{left - 1}dup{seq}", (left - k, left - 1), seq
-        return None
-    
-    # delins 情形（尽量识别成等效dup）
-    m = re.match(r'^(\d+)_(\d+)delins([ACGTN]+)$', cd_nopre, re.IGNORECASE)
-    if m:
-        start = int(m.group(1)); end = int(m.group(2)); seq = m.group(3).upper(); k = len(seq)
-        anchor = start  # 插入位置视为 start 左侧
-        
-        # 增加重复检测的严格条件
-        if k < 3:
-            return None
-            
-        if len(set(seq)) == 1 and k < 3:
-            return None
-            
-        if anchor >= k and coding_dna[anchor - k:anchor] == seq:
-            # 检查序列在CDS中的出现频率
-            seq_count = coding_dna.count(seq)
-            if seq_count > 5:
-                return None
-            return f"c.{anchor - k + 1}_{anchor}dup{seq}", (anchor - k + 1, anchor), seq
-        
-        if k > 1 and anchor >= (k - 1) and coding_dna[anchor - (k - 1):anchor] == seq[:-1]:
-            seq2 = seq[:-1]; k2 = k - 1
-            if len(set(seq2)) == 1 and k2 < 3:
-                return None
-            return f"c.{anchor - k2 + 1}_{anchor}dup{seq2}", (anchor - k2 + 1, anchor), seq2
-        
-        if anchor - 1 >= k and coding_dna[anchor - 1 - k:anchor - 1] == seq:
-            if len(set(seq)) == 1 and k < 3:
-                return None
-            return f"c.{anchor - k}_{anchor - 1}dup{seq}", (anchor - k, anchor - 1), seq
-    return None
+    a = int(m.group(1))
+    b = int(m.group(2) or a)
+    seq = (m.group(3) or coding_dna[a - 1:b]).upper()
+    return norm, (a, b), seq
 
 class CodingChange:
     """编码变化分析器"""
@@ -342,18 +437,19 @@ class CodingChange:
         self.evffile = evffile
         self.genefile = genefile
         self.fastafile = fastafile
+        # 平台 polish 会传：includesnp / alltranscript / newevf / outfile
+        # -includesnp：处理 SNV；默认仅 indel（与 MATCHVAR coding_change 一致）。平台 polish 会传 True。
         self.includesnp = kwargs.get('includesnp', False)
-        self.mrnaseq = kwargs.get('mrnaseq', False)
-        self.onlyAltering = kwargs.get('onlyAltering', False)
-        self.codingseq = kwargs.get('codingseq', False)
         self.alltranscript = kwargs.get('alltranscript', False)
         self.newevf = kwargs.get('newevf')
         self.outfile = kwargs.get('outfile')
+        # 独立 CLI 可选：onlyAltering 跳过同义；mrnaseq/codingseq 预留序列输出
+        self.mrnaseq = kwargs.get('mrnaseq', False)
+        self.onlyAltering = kwargs.get('onlyAltering', False)
+        self.codingseq = kwargs.get('codingseq', False)
         self.tolerate = kwargs.get('tolerate', False)
-        
-        # 添加新的重要参数
-        self.verbose = kwargs.get('verbose', False)  # 详细输出
-        self.man = kwargs.get('man', False)  # 手册
+        self.verbose = kwargs.get('verbose', False)
+        self.man = kwargs.get('man', False)
         
         # 内部变量
         self.queue = []
@@ -439,6 +535,13 @@ class CodingChange:
                     # 跳过标记为unknown的变异
                     if 'unknown' in annotation.lower():
                         continue
+
+                    # 无 -includesnp 时跳过 SNV（长度相等的单碱基替换）
+                    if not self.includesnp:
+                        ref_n = '' if ref in ('-', '.', '*') else ref
+                        alt_n = '' if alt in ('-', '.', '*') else alt
+                        if len(ref_n) == 1 and len(alt_n) == 1:
+                            continue
                     
                     # 解析注释中的转录本信息（含c.与可选p.）
                     items = self._parse_annotation_transcripts(annotation)
@@ -555,20 +658,15 @@ class CodingChange:
                         self.mrnaend[base_name] = me
 
                         # 预计算编码片段（1-based闭区间），用于 g→c 位置映射
+                        # UCSC genePred：正负链均为 cdsStart < cdsEnd（0-based 半开）
                         coding_segments = []
                         cdsStart1 = cdsStart + 1
-                        cdsEnd1 = cdsEnd
+                        cdsEnd1 = cdsEnd  # 0-based exclusive end ≡ 1-based inclusive last CDS base
                         for s0, e0 in zip(exon_start_list, exon_end_list):
                             s1 = s0 + 1
                             e1 = e0
-                            if strand == '-':
-                                # 对于负链基因: cdsStart > cdsEnd
-                                cs = max(s1, cdsEnd1)  # 使用cdsEnd作为下界
-                                ce = min(e1, cdsStart1)  # 使用cdsStart作为上界
-                            else:
-                                # 对于正链基因: cdsStart < cdsEnd
-                                cs = max(s1, cdsStart1)
-                                ce = min(e1, cdsEnd1)
+                            cs = max(s1, cdsStart1)
+                            ce = min(e1, cdsEnd1)
                             if cs <= ce:
                                 coding_segments.append((cs, ce))
                         # 统一按转录本5'→3'方向排列
@@ -668,6 +766,12 @@ class CodingChange:
         
         # 分析变异对蛋白质的影响
         protein_change = self._analyze_protein_change(variant, mrna_seq, cds_start, cds_end)
+
+        # -onlyAltering：跳过同义（不写回 EVF）
+        if self.onlyAltering and isinstance(protein_change, dict):
+            eff = (protein_change.get('effect') or '').lower()
+            if eff.startswith('synonymous'):
+                return
         
         # 更新变异信息
         variant['protein_change'] = protein_change
@@ -717,8 +821,8 @@ class CodingChange:
                     r'^(\d+)_([\d]+)ins([ACGTN]+)$',                     # N_MinsSEQ
                     r'^(\d+)delins([ACGTN]+)$',                           # NdelinsSEQ
                     r'^(\d+)_([\d]+)delins([ACGTN]+)$',                  # N_MdelinsSEQ
-                    r'^(\d+)dup([ACGTN]+)$',                              # NdupSEQ
-                    r'^(\d+)_([\d]+)dup([ACGTN]+)$'                      # N_MdupSEQ
+                    r'^(\d+)dup([ACGTN]*)$',                              # Ndup[SEQ]
+                    r'^(\d+)_([\d]+)dup([ACGTN]*)$'                      # N_Mdup[SEQ]
                 ]
                 for p in patterns:
                     if re.match(p, cd, re.IGNORECASE):
@@ -760,17 +864,20 @@ class CodingChange:
                         variant['corrected_cdot'] = cdot_to_use
 
             if cdot_to_use:
-                # dup 归并：若可将 delins/ins 归并为 dup，则替换 c. 并记录 corrected_cdot
+                # HGVS 3′ 规则归一化（重复区滚动）+ 串联插入优先写 dup
                 try:
-                    dup_try = detect_duplication_cdot(cdot_to_use, coding_dna)
-                    if dup_try:
-                        cdot_to_use = dup_try[0]
+                    norm_c = normalize_coding_indel_hgvs(cdot_to_use, coding_dna)
+                    if norm_c:
+                        if norm_c != cdot_to_use:
+                            cdot_to_use = norm_c
                         variant['corrected_cdot'] = cdot_to_use
                 except Exception:
                     pass
                 # intronic 插入（c.N+/-a_N+/-binsSEQ）不在此处归并，由 annotate_variation 负责；
                 # 但若 EVF 给出 intronic ins，后续 p. 计算会忽略，不会生成错误的蛋白注释。
                 mutated_cds, effect_hint = apply_c_hgvs_to_cds(coding_dna, cdot_to_use)
+                if re.search(r'dup', cdot_to_use or '', re.I) and effect_hint != 'frameshift':
+                    effect_hint = 'dup'
                 wt_protein = translate_protein(coding_dna, chrom)
                 mut_protein = translate_protein(mutated_cds, chrom)
                 # SNV 强制短路：若新密码子为终止子，则直接输出 stopgain（避免被diff误判为删除）
@@ -780,8 +887,9 @@ class CodingChange:
                     codon_idx = (pos_nt - 1) // 3
                     wt_codon = coding_dna[codon_idx*3: codon_idx*3+3]
                     mut_codon = mutated_cds[codon_idx*3: codon_idx*3+3]
-                    wt_aa = CODON_TABLE.get(wt_codon.upper(), 'X')
-                    mut_aa = CODON_TABLE.get(mut_codon.upper(), 'X')
+                    # 须用当前染色体对应表（核 / 线粒体），勿写死 CODON_TABLE
+                    wt_aa = codon_table.get(wt_codon.upper(), 'X')
+                    mut_aa = codon_table.get(mut_codon.upper(), 'X')
                     if mut_aa == '*':
                         prot_pos = codon_idx + 1
                         p_hgvs = f"p.{three_letter(wt_aa)}{prot_pos}Ter"
@@ -794,33 +902,57 @@ class CodingChange:
                     # 若 format 已给出 fs*X，保持；否则计算新终止子位置
                     if 'fs*' not in (p_hgvs or ''):
                         try:
-                            # 从差异起点向后找 '*' 终止子
+                            # 从差异起点向后找 '*' 终止子（pos1 为 1-based）
                             pos1, _, _, _ = diff_proteins(wt_protein, mut_protein)
-                            tail = mut_protein[pos1:]
+                            start_idx = max(0, pos1 - 1)
+                            tail = mut_protein[start_idx:]
                             stop_idx = tail.find('*')
-                            fs_len = stop_idx + 1 if stop_idx >= 0 else 0
-                            aa_new = mut_protein[pos1-1] if pos1-1 < len(mut_protein) and mut_protein[pos1-1] != '*' else '?'
-                            p_hgvs = f"p.{three_letter(wt_protein[pos1-1])}{pos1}{three_letter(aa_new)}fs*{fs_len}"
+                            fs_len = stop_idx + 1 if stop_idx >= 0 else max(0, len(mut_protein) - start_idx)
+                            aa_new = (
+                                mut_protein[start_idx]
+                                if start_idx < len(mut_protein) and mut_protein[start_idx] != '*'
+                                else '?'
+                            )
+                            p_hgvs = (
+                                f"p.{three_letter(wt_protein[start_idx])}{pos1}"
+                                f"{three_letter(aa_new)}fs*{fs_len}"
+                            )
                         except Exception:
                             pass
                     effect = 'frameshift'
                 return {'type': effect.replace('_', ' ') if effect else 'unknown', 'effect': effect or 'unknown', 'p_hgvs': p_hgvs}
 
-            # 回退：使用粗略的基于基因组坐标的方法
-            mrna_pos = variant['start'] - cds_start
+            # 回退：无可用 c. 时，用基因模型从基因组推导 c. 再算 p.（勿用 start-cds_start 当 mRNA 坐标）
+            inferred = self._infer_c_from_genome_snv(variant) or self._infer_c_from_genome_indel(variant)
+            if inferred:
+                try:
+                    cdot = normalize_coding_indel_hgvs(normalize_c_hgvs(inferred), coding_dna)
+                    mutated_cds, effect_hint = apply_c_hgvs_to_cds(coding_dna, cdot)
+                    wt_protein = translate_protein(coding_dna, chrom)
+                    mut_protein = translate_protein(mutated_cds, chrom)
+                    p_hgvs, eff = format_p_hgvs_from_diff(wt_protein, mut_protein, chrom, effect_hint)
+                    variant['corrected_cdot'] = cdot
+                    return {
+                        'type': (eff or 'unknown').replace('_', ' '),
+                        'effect': eff or 'unknown',
+                        'p_hgvs': p_hgvs,
+                    }
+                except Exception:
+                    pass
+            cds_pos0 = self._genome_to_cds_index0(variant)
             ref = variant['ref']
             alt = variant['alt']
-            if alt in ['-', '*'] and len(ref) >= 1:
-                return self._analyze_deletion(variant, mrna_seq, mrna_pos, codon_table)
+            if cds_pos0 is None:
+                return {'type': 'unknown', 'effect': 'unknown', 'p_hgvs': 'p.?'}
+            if alt in ['-', '*', '.'] and len(ref) >= 1:
+                return self._analyze_deletion(variant, coding_dna, cds_pos0, codon_table)
             if len(ref) == len(alt):
                 if len(ref) == 1:
-                    return self._analyze_substitution(variant, mrna_seq, mrna_pos, codon_table)
-                else:
-                    return self._analyze_block_substitution(variant, mrna_seq, mrna_pos, codon_table)
-            elif len(ref) > len(alt):
-                return self._analyze_deletion(variant, mrna_seq, mrna_pos, codon_table)
-            else:
-                return self._analyze_insertion(variant, mrna_seq, mrna_pos, codon_table)
+                    return self._analyze_substitution(variant, coding_dna, cds_pos0, codon_table)
+                return self._analyze_block_substitution(variant, coding_dna, cds_pos0, codon_table)
+            if len(ref) > len(alt):
+                return self._analyze_deletion(variant, coding_dna, cds_pos0, codon_table)
+            return self._analyze_insertion(variant, coding_dna, cds_pos0, codon_table)
         
         except Exception as e:
             if self.tolerate:
@@ -828,6 +960,33 @@ class CodingChange:
                 return {'type': 'unknown', 'effect': 'unknown'}
             else:
                 raise
+
+    def _genome_to_cds_index0(self, variant: Dict) -> Optional[int]:
+        """基因组坐标 → CDS 0-based 下标（用于粗略回退）；失败返回 None。"""
+        transcript = variant.get('transcript')
+        try:
+            gpos = int(variant.get('start'))
+        except Exception:
+            return None
+        if not transcript:
+            return None
+        meta = self._gene_meta.get(transcript) or self._gene_meta.get(str(transcript).split('.')[0])
+        if not meta:
+            return None
+        chrom = variant.get('chrom')
+        if meta.get('chrom') and str(meta['chrom']) != str(chrom):
+            return None
+        strand = meta['strand']
+        traversed = 0
+        for (s, e) in meta['coding_segments']:
+            if s <= gpos <= e:
+                if strand == '+':
+                    offset = gpos - s + 1
+                else:
+                    offset = e - gpos + 1
+                return traversed + offset - 1  # 0-based
+            traversed += (e - s + 1)
+        return None
 
     def _infer_c_from_genome_snv(self, variant: Dict) -> Optional[str]:
         """基于基因组坐标与基因模型，将SNV推导为 c.HGVS（考虑正负链与外显子拼接）。"""
@@ -839,9 +998,11 @@ class CodingChange:
             return None
         ref = (variant.get('ref') or '').upper()
         alt = (variant.get('alt') or '').upper()
-        if not transcript or transcript not in self._gene_meta:
+        meta = self._gene_meta.get(transcript) or self._gene_meta.get(
+            str(transcript).split('.')[0] if transcript else ''
+        )
+        if not meta:
             return None
-        meta = self._gene_meta[transcript]
         if meta.get('chrom') and str(meta['chrom']) != str(chrom):
             return None
         strand = meta['strand']
@@ -875,11 +1036,16 @@ class CodingChange:
             gpos = int(variant.get('start'))
         except Exception:
             return None
-        ref_g = (variant.get('ref') or '').upper()
-        alt_g = (variant.get('alt') or '').upper()
-        if not transcript or transcript not in self._gene_meta:
+        raw_ref = variant.get('ref') or ''
+        raw_alt = variant.get('alt') or ''
+        # MATCHVAR 占位符：'-'/'.'/ '*' 表示空等位基因
+        ref_g = '' if raw_ref in ('-', '.', '*') else raw_ref.upper()
+        alt_g = '' if raw_alt in ('-', '.', '*') else raw_alt.upper()
+        meta = self._gene_meta.get(transcript) or self._gene_meta.get(
+            str(transcript).split('.')[0] if transcript else ''
+        )
+        if not meta:
             return None
-        meta = self._gene_meta[transcript]
         if meta.get('chrom') and str(meta['chrom']) != str(chrom):
             return None
         strand = meta['strand']
@@ -898,27 +1064,18 @@ class CodingChange:
             traversed += (e - s + 1)
         if pos_in_cds is None:
             return None
-        # 规范 indel 两端：以MATCHVAR风格，假设ref/alt共享左侧锚碱基，取差异部分
-        # 插入
+        # 规范 indel：插入用 c.N_(N+1)ins（切勿 delins，否则 apply_c_hgvs 会误删 1bp）
         if len(alt_g) > len(ref_g):
-            ins_seq = alt_g[len(ref_g):]
+            ins_seq = alt_g[len(ref_g):] if ref_g else alt_g
             if strand == '-':
                 ins_seq = reverse_complement(ins_seq)
-            
-            # 检查原始REF是否为"-"，如果是则优先使用delins格式
-            original_ref = variant.get('ref', '')
-            if original_ref == '-' or original_ref == '.' or original_ref == '*':
-                # REF为"-"的插入，使用delins格式，单个位置
-                return f"c.{pos_in_cds}delins{ins_seq}"
-            else:
-                # 常规插入格式
-                if strand == '+':
-                    return f"c.{pos_in_cds}_{pos_in_cds+1}ins{ins_seq}"
-                else:
-                    return f"c.{pos_in_cds-1}_{pos_in_cds}ins{ins_seq}"
+            if strand == '+':
+                return f"c.{pos_in_cds}_{pos_in_cds + 1}ins{ins_seq}"
+            # 负链：基因组左对齐插入点对应转录 3′ 侧翼碱基
+            return f"c.{pos_in_cds - 1}_{pos_in_cds}ins{ins_seq}"
         # 缺失
         if len(ref_g) > len(alt_g):
-            del_seq = ref_g[len(alt_g):]
+            del_seq = ref_g[len(alt_g):] if alt_g else ref_g
             if strand == '-':
                 del_seq = reverse_complement(del_seq)
             # 负链时，pos_in_cds 为区间右端，需向左回溯长度
@@ -945,76 +1102,82 @@ class CodingChange:
             return f"c.{start}_{end}delins{seq}"
         return None
     
-    def _analyze_substitution(self, variant: Dict, mrna_seq: str, mrna_pos: int, codon_table: Dict) -> Dict:
-        """分析替换变异"""
-        ref = variant['ref']
-        alt = variant['alt']
-        
-        # 获取原始密码子
-        codon_start = (mrna_pos // 3) * 3
-        original_codon = mrna_seq[codon_start:codon_start + 3]
-        
-        # 计算变异在密码子中的位置
-        pos_in_codon = mrna_pos % 3
-        
-        # 构建新密码子
-        new_codon = list(original_codon)
-        new_codon[pos_in_codon] = alt
-        new_codon = ''.join(new_codon)
-        
-        # 翻译密码子
+    # 主路径走 c.HGVS→p.；以下为无有效 c. / 推导失败时的粗略回退
+    def _analyze_substitution(self, variant: Dict, coding_dna: str, cds_pos0: int, codon_table: Dict) -> Dict:
+        """分析替换变异。cds_pos0 为 CDS 0-based 下标；等位基因按转录本方向。"""
+        ref = (variant.get('ref') or '').upper()
+        alt = (variant.get('alt') or '').upper()
+        transcript = variant.get('transcript')
+        strand = '+'
+        if transcript and transcript in self._gene_meta:
+            strand = self._gene_meta[transcript].get('strand', '+') or '+'
+        if strand == '-':
+            ref = reverse_complement(ref)
+            alt = reverse_complement(alt)
+        if cds_pos0 < 0 or cds_pos0 >= len(coding_dna):
+            return {'type': 'unknown', 'effect': 'unknown', 'p_hgvs': 'p.?'}
+        if ref and coding_dna[cds_pos0].upper() != ref:
+            # 与本地 CDS 不一致时仍按坐标替换 alt（兼容占位/模糊 REF）
+            pass
+        codon_start = (cds_pos0 // 3) * 3
+        original_codon = coding_dna[codon_start:codon_start + 3].upper()
+        if len(original_codon) < 3:
+            return {'type': 'unknown', 'effect': 'unknown', 'p_hgvs': 'p.?'}
+        pos_in_codon = cds_pos0 % 3
+        new_codon_list = list(original_codon)
+        new_codon_list[pos_in_codon] = alt if alt else 'N'
+        new_codon = ''.join(new_codon_list)
         original_aa = codon_table.get(original_codon, 'X')
         new_aa = codon_table.get(new_codon, 'X')
-        
-        protein_pos = (mrna_pos // 3) + 1
-        # 构建p.注释
-        def three(aa: str) -> str:
-            return AA_ONE_TO_THREE.get(aa, 'Xaa')
-        
+        protein_pos = (cds_pos0 // 3) + 1
         if original_aa == new_aa:
-            p_hgvs = f"p.{three(original_aa)}{protein_pos}{three(new_aa)}" if original_aa != 'X' else "p.?"
+            p_hgvs = f"p.{three_letter(original_aa)}{protein_pos}=" if original_aa not in ('X',) else "p.?"
             return {'type': 'synonymous', 'effect': 'synonymous_SNV', 'p_hgvs': p_hgvs}
-        # 终止子产生/消失
         if new_aa == '*':
-            p_hgvs = f"p.{three(original_aa)}{protein_pos}Ter"
-            return {'type': 'stopgain', 'effect': 'stopgain', 'p_hgvs': p_hgvs}
+            return {
+                'type': 'stopgain', 'effect': 'stopgain',
+                'p_hgvs': f"p.{three_letter(original_aa)}{protein_pos}Ter",
+            }
         if original_aa == '*':
-            p_hgvs = f"p.Ter{protein_pos}{three(new_aa)}"
-            return {'type': 'stoploss', 'effect': 'stoploss', 'p_hgvs': p_hgvs}
-        # 普通错义
-        p_hgvs = f"p.{three(original_aa)}{protein_pos}{three(new_aa)}"
-        return {'type': 'nonsynonymous', 'effect': 'nonsynonymous_SNV', 'p_hgvs': p_hgvs}
-    
-    def _analyze_block_substitution(self, variant: Dict, mrna_seq: str, mrna_pos: int, codon_table: Dict) -> Dict:
-        """分析块替换变异"""
-        ref = variant['ref']
-        alt = variant['alt']
-        
-        # 检查是否为3的倍数
-        if len(ref) % 3 == 0 and len(alt) % 3 == 0:
-            return {'type': 'in-frame_substitution', 'effect': 'inframe_substitution'}
-        else:
-            return {'type': 'frameshift_substitution', 'effect': 'frameshift_substitution'}
-    
-    def _analyze_deletion(self, variant: Dict, mrna_seq: str, mrna_pos: int, codon_table: Dict) -> Dict:
-        """分析删除变异"""
-        ref = variant['ref']
-        
-        # 检查是否为3的倍数
-        if len(ref) % 3 == 0:
+            return {
+                'type': 'stoploss', 'effect': 'stoploss',
+                'p_hgvs': f"p.Ter{protein_pos}{three_letter(new_aa)}",
+            }
+        return {
+            'type': 'nonsynonymous', 'effect': 'nonsynonymous_SNV',
+            'p_hgvs': f"p.{three_letter(original_aa)}{protein_pos}{three_letter(new_aa)}",
+        }
+
+    def _analyze_block_substitution(self, variant: Dict, coding_dna: str, cds_pos0: int, codon_table: Dict) -> Dict:
+        """分析块替换变异（粗略：按长度判整码/移码）。"""
+        ref = variant.get('ref') or ''
+        alt = variant.get('alt') or ''
+        delta = abs(len(ref) - len(alt))
+        if _is_inframe_len(len(ref)) and _is_inframe_len(len(alt)) and _is_inframe_len(delta):
+            return {'type': 'in-frame_substitution', 'effect': 'inframe_substitution', 'p_hgvs': 'p.?'}
+        return {'type': 'frameshift_substitution', 'effect': 'frameshift_substitution', 'p_hgvs': 'p.?'}
+
+    def _analyze_deletion(self, variant: Dict, coding_dna: str, cds_pos0: int, codon_table: Dict) -> Dict:
+        """分析删除变异（粗略）。"""
+        ref = variant.get('ref') or ''
+        alt = variant.get('alt') or ''
+        if alt in ('-', '.', '*'):
+            alt = ''
+        del_len = len(ref) - len(alt) if len(ref) >= len(alt) else len(ref)
+        if _is_inframe_len(del_len):
             return {'type': 'in-frame_deletion', 'effect': 'nonframeshift_deletion', 'p_hgvs': 'p.?'}
-        else:
-            return {'type': 'frameshift_deletion', 'effect': 'frameshift_deletion', 'p_hgvs': 'p.?'}
-    
-    def _analyze_insertion(self, variant: Dict, mrna_seq: str, mrna_pos: int, codon_table: Dict) -> Dict:
-        """分析插入变异"""
-        alt = variant['alt']
-        
-        # 检查是否为3的倍数
-        if len(alt) % 3 == 0:
+        return {'type': 'frameshift_deletion', 'effect': 'frameshift_deletion', 'p_hgvs': 'p.?'}
+
+    def _analyze_insertion(self, variant: Dict, coding_dna: str, cds_pos0: int, codon_table: Dict) -> Dict:
+        """分析插入变异（粗略）。"""
+        ref = variant.get('ref') or ''
+        alt = variant.get('alt') or ''
+        if ref in ('-', '.', '*'):
+            ref = ''
+        ins_len = len(alt) - len(ref) if len(alt) >= len(ref) else len(alt)
+        if _is_inframe_len(ins_len):
             return {'type': 'in-frame_insertion', 'effect': 'nonframeshift_insertion', 'p_hgvs': 'p.?'}
-        else:
-            return {'type': 'frameshift_insertion', 'effect': 'frameshift_insertion', 'p_hgvs': 'p.?'}
+        return {'type': 'frameshift_insertion', 'effect': 'frameshift_insertion', 'p_hgvs': 'p.?'}
     
     def _write_output(self):
         """输出结果"""
@@ -1058,9 +1221,15 @@ class CodingChange:
                             for item in items:
                                 # 尝试匹配两种格式
                                 # 1) GENE:TRANSCRIPT:exonX:c.xxx[:p.yyy]
-                                m1 = re.match(r'^([\w\-\.\@\/]+?):([\w\.\-]+?):(exon\d+):(c\.[\w\->]+)(:p\.[\w\*]+)?$', item)
+                                m1 = re.match(
+                                    r'^([\w\-\.\@\/]+?):([\w\.\-]+?):(exon\d+):(c\.[^:\s,]+)(:p\.[^:\s,]+)?$',
+                                    item,
+                                )
                                 # 2) TRANSCRIPT:exonX:c.xxx[:p.yyy]
-                                m2 = re.match(r'^([\w\.\-]+):(exon\d+):(c\.[\w\->]+)(:p\.[\w\*]+)?$', item)
+                                m2 = re.match(
+                                    r'^([\w\.\-]+):(exon\d+):(c\.[^:\s,]+)(:p\.[^:\s,]+)?$',
+                                    item,
+                                )
                                 if m1:
                                     gene_name = m1.group(1)
                                     transcript = m1.group(2)
@@ -1107,6 +1276,13 @@ class CodingChange:
                                         exonic_func = 'stoploss'
                                 elif 'startloss' in eff_l:
                                     exonic_func = 'startloss'
+                                elif 'duplication' in eff_l:
+                                    # HGVS 将串联插入规范为 dup 后，同步修正外显子功能类别
+                                    exonic_func = (
+                                        'frameshift_duplication'
+                                        if ('frameshift' in eff_l and 'nonframeshift' not in eff_l)
+                                        else 'nonframeshift_duplication'
+                                    )
                                 break
 
                             nf.write('\t'.join([line_id, exonic_func, new_annot, chrom, start, end, ref, alt]) + '\n')
@@ -1136,16 +1312,15 @@ def main():
     parser.add_argument('evffile', help='外显子变异功能文件')
     parser.add_argument('genefile', help='基因定义文件')
     parser.add_argument('fastafile', help='FASTA文件')
-    parser.add_argument('-includesnp', action='store_true', help='包含SNP')
-    parser.add_argument('-mrnaseq', action='store_true', help='mRNA序列')
-    parser.add_argument('-onlyAltering', action='store_true', help='仅改变序列')
-    parser.add_argument('-codingseq', action='store_true', help='编码序列')
+    parser.add_argument('-includesnp', action='store_true', help='包含SNP（平台 polish 会开启）')
     parser.add_argument('-alltranscript', action='store_true', help='所有转录本')
     parser.add_argument('-newevf', help='新的外显子变异功能文件')
     parser.add_argument('-outfile', help='输出文件')
+    # 独立 CLI 可选（平台 polish 通常不传）
+    parser.add_argument('-mrnaseq', action='store_true', help='mRNA序列')
+    parser.add_argument('-onlyAltering', action='store_true', help='仅输出改变氨基酸的变异')
+    parser.add_argument('-codingseq', action='store_true', help='编码序列')
     parser.add_argument('-tolerate', action='store_true', help='容忍错误')
-    
-    # 添加新的重要参数
     parser.add_argument('-verbose', '-v', action='store_true', help='详细输出')
     parser.add_argument('-man', '-m', action='store_true', help='显示手册')
     

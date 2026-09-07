@@ -34,6 +34,14 @@ import pandas as pd
 import seaborn as sns
 from matplotlib import colors as mcolors
 
+from .labeling import (
+    FUNC_LABEL_COLUMNS,
+    PATHOGENIC_TYPES,
+    first_present_column,
+    func_is_pathogenic,
+    label_from_vcf_info,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -78,8 +86,8 @@ def extract_true_labels(df:        pd.DataFrame,
     Extract binary ground-truth labels from an annotated TSV DataFrame.
 
     Checks, in priority order:
-      Func.refGene  →  ExonicFunc.refGene  →  TYPE
-      → VCF INFO embedded in VCF Otherinfo columns
+      Function/Func/ExonicEffect columns → TYPE
+      → VCF INFO embedded in Otherinfo columns
       → VCF INFO from the VCF file itself (if vcf_path is given)
 
     Returns
@@ -87,70 +95,41 @@ def extract_true_labels(df:        pd.DataFrame,
     Optional[np.ndarray]
         Integer array of 0/1 labels, or ``None`` when no suitable source exists.
     """
-    import re as _re
-    _info_re   = _re.compile(r'(?:^|;)TYPE=([^;]+)')
-    _frame_re  = _re.compile(r'(?:^|;)FRAMESHIFT=([^;]+)')
-
-    def _labels_from_info_str(info_str: str) -> int:
-        """Return 1 if the VCF INFO string represents a pathogenic label."""
-        vt_match  = _info_re.search(info_str)
-        fr_match  = _frame_re.search(info_str)
-        vt  = vt_match.group(1).upper().strip() if vt_match else ''
-        fr  = fr_match.group(1).lower().strip() if fr_match else 'false'
-        return int(vt in ('SPLICING', 'SPLICE_SITE', 'FRAMESHIFT') or fr == 'true')
-
     try:
-        # 1. Func.refGene column (standard refGene gene annotation)
-        if 'Func.refGene' in df.columns:
-            func   = df['Func.refGene'].fillna('').astype(str).str.lower()
-            labels = func.str.contains(_FUNC_RE.pattern,
-                                       regex=True, na=False).astype(np.int8)
-            n_pos  = int(labels.sum())
+        col = first_present_column(df.columns, FUNC_LABEL_COLUMNS)
+        if col:
+            values = df[col].fillna('').astype(str)
+            labels = values.map(func_is_pathogenic).astype(np.int8)
+            n_pos = int(labels.sum())
             logger.info(
-                f"Extracted {n_pos} positive labels from Func.refGene "
+                f"Extracted {n_pos} positive labels from {col} "
                 f"({n_pos}/{len(labels)} = {n_pos / max(len(labels), 1):.1%})")
             return labels.values
 
-        # 2. ExonicFunc.refGene column (standard refGene exonic annotation)
-        if 'ExonicFunc.refGene' in df.columns:
-            exonic = df['ExonicFunc.refGene'].fillna('').astype(str).str.lower()
-            labels = exonic.str.contains(_EXFUNC_RE.pattern,
-                                         regex=True, na=False).astype(np.int8)
-            n_pos  = int(labels.sum())
-            logger.info(
-                f"Extracted {n_pos} positive labels from ExonicFunc.refGene "
-                f"({n_pos}/{len(labels)} = {n_pos / max(len(labels), 1):.1%})")
-            return labels.values
-
-        # 3. TYPE column (direct VCF-label column, already parsed by annotation)
         if 'TYPE' in df.columns:
             var_type = df['TYPE'].fillna('').astype(str).str.upper()
-            labels   = var_type.isin(
-                ['SPLICE_SITE', 'FRAMESHIFT', 'NONSENSE', 'STOPLOSS']
-            ).astype(np.int8)
-            n_pos    = int(labels.sum())
+            labels = var_type.isin(list(PATHOGENIC_TYPES)).astype(np.int8)
+            n_pos = int(labels.sum())
             logger.info(
                 f"Extracted {n_pos} positive labels from TYPE column "
                 f"({n_pos}/{len(labels)} = {n_pos / max(len(labels), 1):.1%})")
             return labels.values
 
-        # 4. Otherinfo VCF columns: look for INFO content with TYPE/FRAMESHIFT keys
         for col in df.columns:
-            if not col.startswith('Otherinfo'):
+            if not str(col).startswith('Otherinfo'):
                 continue
             raw = df[col].fillna('').astype(str)
-            labels_raw = [_labels_from_info_str(v) for v in raw]
+            labels_raw = [label_from_vcf_info(v) for v in raw]
             if sum(labels_raw) == 0:
-                continue   # not an INFO column – try next Otherinfo
+                continue
             labels = np.array(labels_raw, dtype=np.int8)
-            n_pos  = int(labels.sum())
+            n_pos = int(labels.sum())
             logger.info(
                 f"Extracted {n_pos} positive labels from {col} "
                 f"(VCF INFO parsed)  "
                 f"({n_pos}/{len(labels)} = {n_pos / max(len(labels), 1):.1%})")
-            return labels.values
+            return labels
 
-        # 5. VCF file directly (most reliable: reads INFO without TSV column ambiguity)
         if vcf_path and os.path.exists(vcf_path):
             labels_list = []
             with open(vcf_path, 'r') as fh:
@@ -160,10 +139,10 @@ def extract_true_labels(df:        pd.DataFrame,
                     parts = line.strip().split('\t')
                     if len(parts) < 8:
                         continue
-                    labels_list.append(_labels_from_info_str(parts[7]))
+                    labels_list.append(label_from_vcf_info(parts[7]))
             if labels_list:
                 labels = np.array(labels_list, dtype=np.int8)
-                n_pos  = int(labels.sum())
+                n_pos = int(labels.sum())
                 logger.info(
                     f"Extracted {n_pos} positive labels from VCF INFO "
                     f"(vcf_path)  "
@@ -173,7 +152,7 @@ def extract_true_labels(df:        pd.DataFrame,
 
         logger.error(
             "No suitable label source found. "
-            "Tried (in order): Func.refGene, ExonicFunc.refGene, TYPE, "
+            "Tried Function/Func/ExonicEffect columns, TYPE, "
             "Otherinfo VCF-INFO columns, VCF INFO from file.")
         return None
 
@@ -839,11 +818,10 @@ class PerformanceVisualizer:
                     break
 
         if type_col is None:
-            if 'Func.refGene' in df.columns and df['Func.refGene'].notna().sum() > 0:
-                type_col = 'Func.refGene'
-            elif 'ExonicFunc.refGene' in df.columns \
-                    and df['ExonicFunc.refGene'].notna().sum() > 0:
-                type_col = 'ExonicFunc.refGene'
+            for candidate in FUNC_LABEL_COLUMNS:
+                if candidate in df.columns and df[candidate].notna().sum() > 0:
+                    type_col = candidate
+                    break
 
         if type_col is None:
             logger.warning("No variant-type column found; skipping distribution plot")

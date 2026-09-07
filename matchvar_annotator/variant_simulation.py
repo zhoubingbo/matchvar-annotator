@@ -243,6 +243,21 @@ class GeneTranscript:
         # Validate exons and build CDS-genomic coordinate mapping
         self._validate_exons()
         self._build_cds_genomic_mapping()
+
+    @classmethod
+    def from_gtf(cls, gene_name: str, transcript_id: str, gtf_file: str, fasta_file: str):
+        """Build a GeneTranscript from GTF + FASTA (used by examples and the pipeline)."""
+        extractor = ExonExtractor(gtf_file, fasta_file)
+        exons, chromosome, strand = extractor.extract_exons(gene_name, transcript_id)
+        return cls(
+            gene_name=gene_name,
+            transcript_id=transcript_id,
+            exons=exons,
+            chromosome=chromosome,
+            strand=strand,
+            genome=extractor.genome,
+            fasta_file=fasta_file,
+        )
     
     @staticmethod
     def _reverse_complement_static(sequence: str) -> str:
@@ -1865,6 +1880,28 @@ class GeneTranscript:
         print(f"Generated {total} total variants")
         return {**variants, 'total': total}
 
+    def _ref_base_at(self, pos0: int) -> str:
+        """Return the 0-based genomic base, or N if lookup fails."""
+        try:
+            if self.genome is not None:
+                base = str(self.genome[self.chromosome][pos0]).upper()
+                if base in self.valid_nucleotides:
+                    return base
+        except Exception:
+            pass
+        return 'N'
+
+    def _vcf_deletion_alleles(self, genomic_start0: int, deleted_sequence: str) -> Tuple[int, str, str]:
+        """Left-aligned VCF deletion: 1-based POS, REF (anchor+deleted), ALT (anchor)."""
+        deleted = (deleted_sequence or '').upper()
+        if genomic_start0 > 0:
+            anchor = self._ref_base_at(genomic_start0 - 1)
+            return genomic_start0, anchor + deleted, anchor
+        return 1, 'N' + deleted, 'N'
+
+    def _frameshift_tag(self, is_frameshift: bool) -> str:
+        return "FRAMESHIFT=true" if is_frameshift else "FRAMESHIFT=false"
+
     def export_to_vcf(self, variants, output_file):
         """Export variants to VCF with accurate genomic coordinates and HGVS validation"""
         # Statistics
@@ -1880,7 +1917,7 @@ class GeneTranscript:
             f.write(f"##INFO=<ID=TYPE,Number=1,Type=String,Description=\"Variant type\">\n")
             f.write(f"##INFO=<ID=HGVS,Number=1,Type=String,Description=\"HGVS notation\">\n")
             f.write(f"##INFO=<ID=SYNONYMOUS,Number=1,Type=Flag,Description=\"Synonymous mutation\">\n")
-            f.write(f"##INFO=<ID=FRAMESHIFT,Number=1,Type=Flag,Description=\"Frameshift mutation\">\n")
+            f.write(f"##INFO=<ID=FRAMESHIFT,Number=1,Type=String,Description=\"Frameshift mutation (true/false)\">\n")
             f.write(f"##INFO=<ID=SPLICE_TYPE,Number=1,Type=String,Description=\"Splice site type (donor/acceptor)\">\n")
             f.write(f"##INFO=<ID=SPLICE_SEVERITY,Number=1,Type=String,Description=\"Splice variant severity (high/moderate/low)\">\n")
             f.write(f"##INFO=<ID=IS_CANONICAL,Number=1,Type=Flag,Description=\"Canonical splice site variant\">\n")
@@ -1947,7 +1984,9 @@ class GeneTranscript:
                     f"HGVS={hgvs}"
                 ]
                 if var['is_frameshift']:
-                    info.append("FRAMESHIFT")
+                    info.append("FRAMESHIFT=true")
+                else:
+                    info.append("FRAMESHIFT=false")
                 
                 # Add mutation spectrum information (if available)
                 if 'mutation_probability' in var:
@@ -1984,7 +2023,9 @@ class GeneTranscript:
                     f"HGVS={hgvs}"
                 ]
                 if var['is_frameshift']:
-                    info.append("FRAMESHIFT")
+                    info.append("FRAMESHIFT=true")
+                else:
+                    info.append("FRAMESHIFT=false")
                 
                 # Add mutation spectrum information (if available)
                 if 'mutation_probability' in var:
@@ -2001,7 +2042,8 @@ class GeneTranscript:
                 if 'Total_Score' in var:
                     info.append(f"TOTAL_SCORE={var['Total_Score']}")
                 
-                f.write(f"{self.chromosome}\t{var['genomic_start']+1}\t{var_id}\t{var['deleted_sequence']}\t.\t.\tPASS\t{';'.join(info)}\n")
+                pos, ref, alt = self._vcf_deletion_alleles(var['genomic_start'], var['deleted_sequence'])
+                f.write(f"{self.chromosome}\t{pos}\t{var_id}\t{ref}\t{alt}\t.\tPASS\t{';'.join(info)}\n")
                 var_id += 1
             
             # Export splice site variants
@@ -2075,9 +2117,12 @@ class GeneTranscript:
                 
                 # Write variant line based on type
                 if variant_type == 'inframe_deletion':
-                    f.write(f"{self.chromosome}\t{var['genomic_start']+1}\t{var_id}\t{var['deleted_sequence']}\t.\t.\tPASS\t{';'.join(info)}\n")
+                    pos, ref, alt = self._vcf_deletion_alleles(var['genomic_start'], var['deleted_sequence'])
+                    f.write(f"{self.chromosome}\t{pos}\t{var_id}\t{ref}\t{alt}\t.\tPASS\t{';'.join(info)}\n")
                 elif variant_type == 'inframe_insertion':
-                    f.write(f"{self.chromosome}\t{var['genomic_pos']+1}\t{var_id}\t.\t{var['inserted_sequence']}\t.\tPASS\t{';'.join(info)}\n")
+                    ref_base = var.get('ref_base') or self._ref_base_at(var['genomic_pos'])
+                    inserted = var.get('inserted_sequence', '')
+                    f.write(f"{self.chromosome}\t{var['genomic_pos']+1}\t{var_id}\t{ref_base}\t{ref_base}{inserted}\t.\tPASS\t{';'.join(info)}\n")
                 
                 var_id += 1
         

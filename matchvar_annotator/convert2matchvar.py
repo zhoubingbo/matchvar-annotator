@@ -30,8 +30,8 @@ class Convert2Matchvar:
         self.outfile = kwargs.get('outfile')
         self.format = kwargs.get('format', 'pileup')
         self.includeinfo = kwargs.get('includeinfo', False)
-        self.snpqual = kwargs.get('snpqual', 20)
-        self.snppvalue = kwargs.get('snppvalue', 1)
+        self.snpqual = kwargs.get('snpqual', None)
+        self.snppvalue = kwargs.get('snppvalue', None)
         self.coverage = kwargs.get('coverage', 0)
         self.maxcoverage = kwargs.get('maxcoverage')
         self.chr = kwargs.get('chr')
@@ -87,10 +87,10 @@ class Convert2Matchvar:
                 logger.info(f"NOTICE: output files will be written to {self.outfile}.<samplename>.mvinput")
         
         # 验证参数
-        if self.snpqual and self.format not in ['pileup', 'vcf4old']:
+        if self.snpqual is not None and self.format not in ['pileup', 'vcf4old']:
             raise ValueError("Error in argument: the --snpqual is supported only for the 'pileup' or 'vcf4old' format")
         
-        if self.snppvalue and self.format != 'gff3-solid':
+        if self.snppvalue is not None and self.format != 'gff3-solid':
             raise ValueError("Error in argument: the --snppvalue is supported only for the 'gff3-solid' format")
         
         if not self.snpqual and self.format == 'pileup':

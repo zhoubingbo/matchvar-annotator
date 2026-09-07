@@ -58,7 +58,10 @@ setup(
         'docs': [
             'sphinx>=4.0',
             'sphinx-rtd-theme>=0.5',
-        ]
+        ],
+        'bb': [
+            'pyBigWig>=0.3.18',
+        ],
     },
     entry_points={
         'console_scripts': [
@@ -69,6 +72,7 @@ setup(
             'matchvar-index=matchvar_annotator.build_tabix_indexes:main',
             'matchvar-db=matchvar_annotator.db_cli:main',
             'matchvar-pipeline=matchvar_annotator.simulate_annotate_pipeline:main',
+            'matchvar-ghgvs=matchvar_annotator.ghgvs:main',
         ],
     },
     include_package_data=True,
