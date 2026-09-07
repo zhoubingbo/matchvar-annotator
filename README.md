@@ -38,7 +38,16 @@ pip install matchvar-annotator
 # or from source
 git clone https://github.com/zhoubingbo/matchvar-annotator.git
 cd matchvar-annotator
-pip install -e .
+pip install setuptools wheel
+pip install -e . --no-build-isolation
+```
+
+`--no-build-isolation` uses the venv’s existing `setuptools` instead of downloading a fresh copy. That avoids a common failure with PyPI mirrors (for example Tsinghua `tuna`): isolated builds report `No matching distribution found for setuptools`.
+
+If you still want an isolated build against the official index:
+
+```bash
+PIP_INDEX_URL=https://pypi.org/simple pip install -e .
 ```
 
 Visualization, AUROC, FASTA/GTF simulation, and tabix indexing are included in the main install (`matplotlib`, `scikit-learn`, `biopython`, `pyfaidx`, `pysam`).
