@@ -161,3 +161,4 @@ tmp/
 # Test data
 test_data/
 sample_data/
+test_results/

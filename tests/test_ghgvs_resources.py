@@ -15,9 +15,12 @@ from matchvar_annotator.column_names import (
 )
 from matchvar_annotator.ghgvs import ghgvs_to_mvinput_lines
 from matchvar_annotator.resource_files import (
+    can_use_gene_bigbed,
     chrom_aliases,
     discover_gene_protocols,
+    ensure_gene_pred,
     parse_bigbed_gene_entry,
+    pybigwig_available,
     resolve_cytoband,
     resolve_gene_bigbed,
     resolve_genome_2bit,
@@ -120,13 +123,36 @@ class TestResourceDiscovery:
         found = discover_gene_protocols(str(tmp_path), "hg19")
         names = [p for p, _ in found]
         assert "refGene" in names
-        assert "ncbiRefSeq" in names
-        assert "gencode" in names
         assert "cytoBand" in names
         assert resolve_cytoband(str(tmp_path), "hg19")
         assert resolve_gene_bigbed(str(tmp_path), "ncbiRefSeq", "hg19")
         assert resolve_gene_bigbed(str(tmp_path), "gencode", "hg19")
         assert resolve_genome_2bit(str(tmp_path), "hg19")
+        # Fake .bb files are not usable without pyBigWig or a genePred cache.
+        if pybigwig_available():
+            assert "ncbiRefSeq" in names
+            assert "gencode" in names
+        else:
+            assert "ncbiRefSeq" not in names
+            assert "gencode" not in names
+            assert not can_use_gene_bigbed(str(tmp_path / "ncbiRefSeq.bb"))
+
+    def test_discover_uses_cached_genepred(self, tmp_path):
+        (tmp_path / "hg19_refGene.txt").write_text("x\n")
+        bb = tmp_path / "ncbiRefSeq.bb"
+        bb.write_bytes(b"not-a-real-bb")
+        (tmp_path / "ncbiRefSeq.bb.genePred.txt").write_text(
+            "0\tNM_1\tchr1\t+\t0\t10\t0\t10\t1\t0,\t10,\t0\tGENE\tcmpl\tcmpl\n"
+        )
+        names = [p for p, _ in discover_gene_protocols(str(tmp_path), "hg19")]
+        assert "refGene" in names
+        assert "ncbiRefSeq" in names
+        assert can_use_gene_bigbed(str(bb))
+
+    def test_ensure_gene_pred_unreadable_bb_raises(self, tmp_path):
+        (tmp_path / "ncbiRefSeq.bb").write_bytes(b"not-a-real-bb")
+        with pytest.raises(RuntimeError, match="Cannot load gene models"):
+            ensure_gene_pred(str(tmp_path), "ncbiRefSeq", "hg19")
 
     def test_parse_bed12_entry(self):
         rest = "NM_1\t0\t-\t10\t20\t0\t2\t5,5,\t0,10,\tGENE"

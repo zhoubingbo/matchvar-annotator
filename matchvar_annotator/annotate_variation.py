@@ -543,23 +543,19 @@ class AnnotateVariation:
     def _load_gene_database(self) -> Dict:
         """Load gene database"""
         gene_db = {}
-        
+        gene_file = _resource_mod().ensure_gene_pred(self.dbloc, self.dbtype1, self.buildver)
+        if not gene_file:
+            gene_file = os.path.join(self.dbloc, f"{self.buildver}_{self.dbtype1}.txt")
+            if not os.path.exists(gene_file):
+                bare = os.path.join(self.dbloc, f"{self.dbtype1}.txt")
+                if os.path.exists(bare):
+                    gene_file = bare
+        if not gene_file or not os.path.exists(gene_file):
+            raise FileNotFoundError(
+                f"Gene database file does not exist for {self.dbtype1}: {gene_file}"
+            )
+        logger.info(f"Loaded gene models from {gene_file}")
         try:
-            gene_file = None
-            try:
-                gene_file = _resource_mod().ensure_gene_pred(self.dbloc, self.dbtype1, self.buildver)
-            except Exception as exc:
-                logger.debug("ensure_gene_pred failed: %s", exc)
-            if not gene_file:
-                gene_file = os.path.join(self.dbloc, f"{self.buildver}_{self.dbtype1}.txt")
-                if not os.path.exists(gene_file):
-                    bare = os.path.join(self.dbloc, f"{self.dbtype1}.txt")
-                    if os.path.exists(bare):
-                        gene_file = bare
-            if not gene_file or not os.path.exists(gene_file):
-                logger.warning(f"Gene database file does not exist: {gene_file}")
-                return gene_db
-            logger.info(f"Loaded gene models from {gene_file}")
             
             # Load kgXref file (if it exists and is knownGene database)
             kgxref = {}
@@ -691,7 +687,15 @@ class AnnotateVariation:
         
         except Exception as e:
             logger.error(f"Failed to load gene database: {e}")
-        
+            raise
+
+        n_tx = sum(len(v) for v in gene_db.values())
+        if n_tx == 0:
+            raise RuntimeError(
+                f"Loaded 0 transcripts from {gene_file} for {self.dbtype1}; "
+                "refusing to annotate every variant as intergenic"
+            )
+        logger.info(f"Loaded {n_tx} transcripts for {self.dbtype1}")
         return gene_db
     
     def _load_kgxref(self, kgxreffile: str) -> Dict[str, str]:

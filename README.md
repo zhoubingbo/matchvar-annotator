@@ -474,6 +474,7 @@ pytest tests/
 | Empty ClinVar ROC | Matching uses `Ref`/`Alt` (and VCF allele aliases) plus chromosome without requiring a `chr` prefix. |
 | spectrum/hybrid still looks traditional | Check logs: empty spectrum output falls back. Ensure GTF+FASTA yield a CDS, and try a lower `--min-probability`. |
 | `No MANE transcript file` | Place a MANE GTF under `resources/mane/`, `humandb/mane_transcript.txt`, or `humandb/mane.bb` (needs pyBigWig). |
+| `Function.ncbiRefSeq` / `Function.gencode` is `intergenic` while `refGene` is filled | Those protocols come from `*.bb`. Install `pip install 'matchvar-annotator[bb]'` (pyBigWig). Without it, auto-detect now skips them instead of writing empty columns. |
 
 ## Project layout
 

@@ -275,6 +275,28 @@ class GenomeSequence:
         return self.fetch(chrom, start - 1, end)
 
 
+def pybigwig_available() -> bool:
+    try:
+        import pyBigWig  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def gene_bigbed_cache_path(bb_path: str) -> str:
+    return os.path.abspath(bb_path) + ".genePred.txt"
+
+
+def can_use_gene_bigbed(bb_path: Optional[str]) -> bool:
+    """True if the bigBed can be read now (cached genePred or pyBigWig)."""
+    if not bb_path or not os.path.isfile(bb_path):
+        return False
+    cache = gene_bigbed_cache_path(bb_path)
+    if os.path.isfile(cache) and os.path.getmtime(cache) >= os.path.getmtime(bb_path):
+        return True
+    return pybigwig_available()
+
+
 def _open_pybigwig(path: str):
     try:
         import pyBigWig
@@ -437,6 +459,14 @@ def ensure_gene_pred(dbloc: str, protocol: str, buildver: str = "hg19") -> Optio
             return materialize_bigbed_genepred(bb)
         except Exception as exc:
             logger.warning("failed to materialize %s: %s", bb, exc)
+            txt_ok = bool(txt) and not str(txt).endswith(".bb")
+            if txt_ok:
+                logger.warning("falling back to genePred text %s", txt)
+                return txt
+            raise RuntimeError(
+                f"Cannot load gene models for {proto} from {bb}: {exc}. "
+                "Install pyBigWig with: pip install 'matchvar-annotator[bb]'"
+            ) from exc
     return txt
 
 
@@ -567,6 +597,18 @@ def extract_mrna_fasta(
     return outfile
 
 
+def _skip_unreadable_bigbed(protocol: str, bb_path: str) -> None:
+    logger.warning(
+        "Skipping %s: %s is present but cannot be read "
+        "(install pyBigWig: pip install 'matchvar-annotator[bb]', "
+        "or keep a cached %s). Without this, every variant would be "
+        "labelled intergenic.",
+        protocol,
+        os.path.basename(bb_path),
+        os.path.basename(gene_bigbed_cache_path(bb_path)),
+    )
+
+
 def discover_gene_protocols(dbloc: str, buildver: str = "hg19") -> List[Tuple[str, str]]:
     """Return (protocol, operation) pairs available in humandb."""
     out: List[Tuple[str, str]] = []
@@ -574,10 +616,14 @@ def discover_gene_protocols(dbloc: str, buildver: str = "hg19") -> List[Tuple[st
     ref_bb = resolve_gene_bigbed(dbloc, "ncbiRefSeq", buildver)
     if ref_txt and "refgene" in os.path.basename(ref_txt).lower():
         out.append(("refGene", "g"))
-        if ref_bb:
+        if ref_bb and can_use_gene_bigbed(ref_bb):
             out.append(("ncbiRefSeq", "g"))
-    elif ref_bb:
+        elif ref_bb:
+            _skip_unreadable_bigbed("ncbiRefSeq", ref_bb)
+    elif ref_bb and can_use_gene_bigbed(ref_bb):
         out.append(("ncbiRefSeq", "g"))
+    elif ref_bb:
+        _skip_unreadable_bigbed("ncbiRefSeq", ref_bb)
     elif ref_txt:
         out.append(("refGene", "g"))
 
@@ -585,10 +631,14 @@ def discover_gene_protocols(dbloc: str, buildver: str = "hg19") -> List[Tuple[st
     gencode_bb = resolve_gene_bigbed(dbloc, "gencode", buildver)
     if ens_txt and "ensgene" in os.path.basename(ens_txt).lower():
         out.append(("ensGene", "g"))
-        if gencode_bb:
+        if gencode_bb and can_use_gene_bigbed(gencode_bb):
             out.append(("gencode", "g"))
-    elif gencode_bb:
+        elif gencode_bb:
+            _skip_unreadable_bigbed("gencode", gencode_bb)
+    elif gencode_bb and can_use_gene_bigbed(gencode_bb):
         out.append(("gencode", "g"))
+    elif gencode_bb:
+        _skip_unreadable_bigbed("gencode", gencode_bb)
     elif ens_txt:
         out.append(("ensGene", "g"))
 

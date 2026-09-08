@@ -133,6 +133,7 @@ def annotate_g_hgvs(
             )
         protocol = ",".join(p for p, _ in discovered)
         operation = ",".join(op for _, op in discovered)
+        logger.info("auto-detected protocols: %s", protocol)
     elif not operation:
         ops = []
         for p in protocol.split(","):
