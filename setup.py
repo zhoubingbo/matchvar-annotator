@@ -71,6 +71,8 @@ setup(
             'matchvar-coding=matchvar_annotator.coding_change:main',
             'matchvar-index=matchvar_annotator.build_tabix_indexes:main',
             'matchvar-db=matchvar_annotator.db_cli:main',
+            'matchvar-clinvardb=matchvar_annotator.vcf2clinvar_db:main',
+            'matchvar-dbnsfpdb=matchvar_annotator.dbnsfp2matchvar_db:main',
             'matchvar-pipeline=matchvar_annotator.simulate_annotate_pipeline:main',
             'matchvar-ghgvs=matchvar_annotator.ghgvs:main',
         ],

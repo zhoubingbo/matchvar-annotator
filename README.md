@@ -81,6 +81,8 @@ Gzipped files with `.tbi` indexes are supported. Reading `*.bb` requires `pyBigW
 | `matchvar-coding` | EVF → c./p. HGVS polish |
 | `matchvar-ghgvs` | g.HGVS file or `--hgvs` → annotation TSV |
 | `matchvar-db` / `matchvar-index` | Database status, bgzip + tabix |
+| `matchvar-clinvardb` | ClinVar VCF → `{buildver}_clinvar.txt` |
+| `matchvar-dbnsfpdb` | dbNSFP TSV → MATCHVAR filter DB |
 
 ### 1. Annotate a VCF (`matchvar-annotator`)
 
@@ -288,6 +290,18 @@ matchvar-db status  --humandb /path/to/humandb --buildver hg19
 matchvar-db index   --humandb /path/to/humandb --buildver hg19 --threads 8 --min-size-gb 5.0
 matchvar-db verify  --humandb /path/to/humandb --buildver hg19
 matchvar-index --humandb /path/to/humandb --buildver hg19 --threads 8 --pre-sort --verify
+```
+
+### 7. Build ClinVar / dbNSFP filter databases
+
+```bash
+matchvar-clinvardb clinvar.vcf.gz \
+  -o resources/humandb/hg19/hg19_clinvar.txt \
+  --info-fields CLNSIG,CLNREVSTAT,CLNALLELEID,GENEINFO
+
+matchvar-dbnsfpdb dbNSFP5.3a.gz \
+  -o resources/humandb/hg19/hg19_dbnsfp531a_rankscore.txt \
+  --rankscore-only --buildver hg19
 ```
 
 ## Python API
