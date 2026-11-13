@@ -1,7 +1,7 @@
 # MATCHVAR Annotator
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/zhoubingbo/matchvar-annotator/blob/main/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/matchvar-annotator.svg)](https://pypi.org/project/matchvar-annotator/)
 [![Web Tool](https://img.shields.io/badge/Web%20Tool-Online-brightgreen.svg)](https://matchvar.intelligene.cn/)
 
@@ -521,3 +521,4 @@ MIT. Author: Bingbo Zhou \<zhoubingbo@hotmail.com\>
 
 - Source: [https://github.com/zhoubingbo/matchvar-annotator](https://github.com/zhoubingbo/matchvar-annotator)
 - Web tool: [https://matchvar.intelligene.cn/](https://matchvar.intelligene.cn/)
+- Release process for maintainers: [PUBLISHING.md](https://github.com/zhoubingbo/matchvar-annotator/blob/main/PUBLISHING.md)

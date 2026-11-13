@@ -1,0 +1,10 @@
+# Development and release tooling: pip install -r requirements-dev.txt
+pytest>=6.0
+pytest-cov>=2.0
+black>=21.0
+flake8>=3.8
+mypy>=0.800
+
+# Build and publish to PyPI
+build>=1.0.0
+twine>=4.0.0

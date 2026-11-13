@@ -1,0 +1,22 @@
+[distutils]
+index-servers =
+    pypi
+    testpypi
+
+# Copy this file to ~/.pypirc and replace the token with your own.
+# Never commit the real ~/.pypirc or API tokens to git.
+#
+# Create API tokens at:
+#   PyPI:      https://pypi.org/manage/account/token/
+#   TestPyPI:  https://test.pypi.org/manage/account/token/
+#
+# Use "__token__" as the username for API-token authentication.
+
+[pypi]
+username = __token__
+password = pypi-REPLACE_WITH_YOUR_PYPI_API_TOKEN
+
+[testpypi]
+repository = https://test.pypi.org/legacy/
+username = __token__
+password = pypi-REPLACE_WITH_YOUR_TESTPYPI_API_TOKEN

@@ -1,6 +1,9 @@
 include README.md
+include CHANGELOG.md
+include PUBLISHING.md
 include LICENSE
 include requirements.txt
+include requirements-dev.txt
 include MANIFEST.in
 
 recursive-include matchvar_annotator *.py

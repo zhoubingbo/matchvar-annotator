@@ -1,6 +1,6 @@
 # MATCHVAR注释器 Makefile
 
-.PHONY: help install install-dev test lint format clean build dist upload docs
+.PHONY: help install install-dev test lint format clean build dist verify upload-test upload docs
 
 help:  ## 显示帮助信息
 	@echo "可用的命令:"
@@ -47,11 +47,14 @@ build: clean  ## 构建包
 dist: build  ## 创建分发包
 	@echo "分发包已创建在 dist/ 目录中"
 
-upload-test: dist  ## 上传到测试PyPI
-	twine upload --repository testpypi dist/*
+verify: dist  ## 校验分发包元数据与 README
+	python -m twine check dist/*
 
-upload: dist  ## 上传到PyPI
-	twine upload dist/*
+upload-test: verify  ## 上传到测试PyPI
+	python -m twine upload --repository testpypi dist/*
+
+upload: verify  ## 上传到PyPI
+	python -m twine upload dist/*
 
 docs:  ## 构建文档
 	cd docs && make html
